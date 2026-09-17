@@ -7,6 +7,7 @@ const authorize = require("../middlewares/roleMiddleware");
 
 const userRouter = express.Router();
 
+userRouter.get( "/",getAllUsers)
 userRouter.get( "/", protect, authorize("admin"),getAllUsers)
             .get("/:id",protect,authorize("admin"),getUserById)
             .put("/:id",protect, authorize("admin"), updateUser)
