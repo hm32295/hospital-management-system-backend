@@ -21,7 +21,6 @@ const specialtyRouter = require("./routes/specialtyRouter");
 const doctorRouter = require("./routes/doctorRouter");
 const visitRouter = require("./routes/visitRouter");
 const consultationRouter = require("./routes/consultationRouter");
-const operationTypeRouter = require("./routes/operationType.routes");
 const operationRouter = require("./routes/operation.routes");
 const operationPaymentRouter = require("./routes/operationPayment.routes");
 const cashTransactionRouter = require("./routes/cashTransaction.routes");
