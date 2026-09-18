@@ -172,9 +172,7 @@ const getAllDoctors = async (req, res) => {
 
 const getSingleDoctor = async (req, res) => {
   try {
-    const doctor =
-      await doctorModels
-        .findById(req.params.id)
+    const doctor =await doctorModels.findById(req.params.id)
         .populate(
           "specialties",
           "name"

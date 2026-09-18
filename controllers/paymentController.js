@@ -8,11 +8,49 @@ const Patient = require("../models/patient.models");
 const CashDrawer = require("../models/cashDrawer.models");
 const CashTransaction = require("../models/cashTransaction.model");
 
-const getOpenCashDrawer = async () => {
-  return CashDrawer.findOne({
+const getOpenCashDrawer = async (session = null) => {
+  const query = CashDrawer.findOne({
     status: "open",
   });
-}; 
+
+  if (session) {
+    query.session(session);
+  }
+
+  return query;
+};
+
+const getCompletedPaymentsTotal = async (
+  filter,
+  session = null
+) => {
+  const query = Payment.aggregate([
+    {
+      $match: {
+        ...filter,
+        status: "completed",
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        totalPaid: {
+          $sum: "$amount",
+        },
+      },
+    },
+  ]);
+
+  if (session) {
+    query.session(session);
+  }
+
+  const result = await query;
+
+  return result.length > 0
+    ? Number(result[0].totalPaid || 0)
+    : 0;
+};
 
 const createPayment = async (req, res) => {
   const session = await mongoose.startSession();
@@ -25,7 +63,7 @@ const createPayment = async (req, res) => {
       notes = "",
     } = req.body;
 
-    if (!sale || !amount) {
+    if (!sale || amount === undefined) {
       await session.abortTransaction();
 
       return res.status(400).json({
@@ -37,7 +75,7 @@ const createPayment = async (req, res) => {
     const paymentAmount = Number(amount);
 
     if (
-      Number.isNaN(paymentAmount) ||
+      !Number.isFinite(paymentAmount) ||
       paymentAmount <= 0
     ) {
       await session.abortTransaction();
@@ -69,10 +107,21 @@ const createPayment = async (req, res) => {
       });
     }
 
-    if (
-      existingSale.paymentStatus === "paid" ||
-      existingSale.remainingAmount <= 0
-    ) {
+    const totalAmount =
+      Number(existingSale.totalAmount || 0);
+
+    const totalPaid =
+      await getCompletedPaymentsTotal(
+        {
+          sale: existingSale._id,
+        },
+        session
+      );
+
+    const remainingAmount =
+      Math.max(totalAmount - totalPaid, 0);
+
+    if (remainingAmount <= 0) {
       await session.abortTransaction();
 
       return res.status(400).json({
@@ -81,20 +130,19 @@ const createPayment = async (req, res) => {
       });
     }
 
-    if (
-      paymentAmount >
-      existingSale.remainingAmount
-    ) {
+    if (paymentAmount > remainingAmount) {
       await session.abortTransaction();
 
       return res.status(400).json({
         success: false,
-        message: "Payment amount exceeds remaining amount",
+        message:
+          "Payment amount exceeds remaining amount",
+        remainingAmount,
       });
     }
 
     const cashDrawer =
-      await getOpenCashDrawer();
+      await getOpenCashDrawer(session);
 
     if (!cashDrawer) {
       await session.abortTransaction();
@@ -105,13 +153,13 @@ const createPayment = async (req, res) => {
       });
     }
 
-    const patientId = existingSale.patient;
+    const patientId =
+      existingSale.patient || null;
 
     if (patientId) {
       const patient =
-        await Patient.findById(patientId).session(
-          session
-        );
+        await Patient.findById(patientId)
+          .session(session);
 
       if (!patient) {
         await session.abortTransaction();
@@ -123,19 +171,13 @@ const createPayment = async (req, res) => {
       }
     }
 
-    const oldPaidAmount =
-      Number(existingSale.paidAmount || 0);
-
-    const oldRemainingAmount =
-      Number(existingSale.remainingAmount || 0);
-
     const newPaidAmount =
-      oldPaidAmount + paymentAmount;
+      totalPaid + paymentAmount;
 
     const newRemainingAmount =
       Math.max(
-        0,
-        oldRemainingAmount - paymentAmount
+        totalAmount - newPaidAmount,
+        0
       );
 
     existingSale.paidAmount =
@@ -149,10 +191,7 @@ const createPayment = async (req, res) => {
         ? "paid"
         : "partial";
 
-    if (
-      newRemainingAmount === 0 &&
-      existingSale.status !== "completed"
-    ) {
+    if (newRemainingAmount === 0) {
       existingSale.status = "completed";
     }
 
@@ -165,7 +204,7 @@ const createPayment = async (req, res) => {
       sale: existingSale._id,
       visit: null,
       operation: null,
-      patient: patientId || null,
+      patient: patientId,
       amount: paymentAmount,
       receivedBy: req.user._id,
       cashDrawer: cashDrawer._id,
@@ -185,7 +224,7 @@ const createPayment = async (req, res) => {
         amount: paymentAmount,
         sale: existingSale._id,
         payment: payment._id,
-        patient: patientId || null,
+        patient: patientId,
         createdBy: req.user._id,
         notes,
       });
@@ -208,7 +247,7 @@ const createPayment = async (req, res) => {
       await Payment.findById(payment._id)
         .populate(
           "sale",
-          "totalAmount paidAmount remainingAmount paymentStatus status"
+          "patient items totalAmount discount paidAmount remainingAmount paymentStatus status createdAt"
         )
         .populate(
           "patient",
@@ -230,6 +269,7 @@ const createPayment = async (req, res) => {
       sale: existingSale,
       cashTransaction,
       summary: {
+        totalAmount,
         paidAmount: newPaidAmount,
         remainingAmount: newRemainingAmount,
         paymentStatus:
@@ -250,19 +290,22 @@ const createPayment = async (req, res) => {
       error: error.message,
     });
   } finally {
-    session.endSession();
+    await session.endSession();
   }
 };
- 
-const createVisitPayment = async (req,res) => {
+
+const createVisitPayment = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
     const { visitId } = req.params;
-    const {amount,notes = ""} = req.body;
+    const {
+      amount,
+      notes = "",
+    } = req.body;
 
-    if (!amount) {
+    if (amount === undefined) {
       await session.abortTransaction();
 
       return res.status(400).json({
@@ -274,7 +317,7 @@ const createVisitPayment = async (req,res) => {
     const paymentAmount = Number(amount);
 
     if (
-      Number.isNaN(paymentAmount) ||
+      !Number.isFinite(paymentAmount) ||
       paymentAmount <= 0
     ) {
       await session.abortTransaction();
@@ -286,9 +329,8 @@ const createVisitPayment = async (req,res) => {
     }
 
     const visit =
-      await Visit.findById(visitId).session(
-        session
-      );
+      await Visit.findById(visitId)
+        .session(session);
 
     if (!visit) {
       await session.abortTransaction();
@@ -299,32 +341,54 @@ const createVisitPayment = async (req,res) => {
       });
     }
 
-    if (
-      visit.paymentStatus === "paid"
-    ) {
+    if (visit.status === "cancelled") {
       await session.abortTransaction();
 
       return res.status(400).json({
         success: false,
-        message: "Visit is already paid",
+        message: "Cannot pay a cancelled visit",
       });
     }
 
-    if (
-      paymentAmount !==
-      Number(visit.consultationFee)
-    ) {
+    const consultationFee =
+      Number(visit.consultationFee || 0);
+
+    const totalPaid =
+      await getCompletedPaymentsTotal(
+        {
+          visit: visit._id,
+        },
+        session
+      );
+
+    const remainingAmount =
+      Math.max(
+        consultationFee - totalPaid,
+        0
+      );
+
+    if (remainingAmount <= 0) {
+      await session.abortTransaction();
+
+      return res.status(400).json({
+        success: false,
+        message: "Visit is already fully paid",
+      });
+    }
+
+    if (paymentAmount !== remainingAmount) {
       await session.abortTransaction();
 
       return res.status(400).json({
         success: false,
         message:
-          "Payment amount must equal consultation fee",
+          "Payment amount must equal remaining visit amount",
+        remainingAmount,
       });
     }
 
     const cashDrawer =
-      await getOpenCashDrawer();
+      await getOpenCashDrawer(session);
 
     if (!cashDrawer) {
       await session.abortTransaction();
@@ -338,9 +402,8 @@ const createVisitPayment = async (req,res) => {
     const patientId = visit.patient;
 
     const patient =
-      await Patient.findById(patientId).session(
-        session
-      );
+      await Patient.findById(patientId)
+        .session(session);
 
     if (!patient) {
       await session.abortTransaction();
@@ -429,6 +492,9 @@ const createVisitPayment = async (req,res) => {
       cashTransaction,
       summary: {
         amount: paymentAmount,
+        totalPaid:
+          totalPaid + paymentAmount,
+        remainingAmount: 0,
         paymentStatus:
           visit.paymentStatus,
       },
@@ -448,18 +514,25 @@ const createVisitPayment = async (req,res) => {
       error: error.message,
     });
   } finally {
-    session.endSession();
+    await session.endSession();
   }
 };
 
-const createOperationPayment = async (req,res) => {
+const createOperationPayment = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    const { operation, amount, notes = "",} = req.body;
+    const {
+      operation,
+      amount,
+      notes = "",
+    } = req.body;
 
-    if (!operation || !amount) {
+    if (
+      !operation ||
+      amount === undefined
+    ) {
       await session.abortTransaction();
 
       return res.status(400).json({
@@ -472,7 +545,7 @@ const createOperationPayment = async (req,res) => {
     const paymentAmount = Number(amount);
 
     if (
-      Number.isNaN(paymentAmount) ||
+      !Number.isFinite(paymentAmount) ||
       paymentAmount <= 0
     ) {
       await session.abortTransaction();
@@ -484,9 +557,8 @@ const createOperationPayment = async (req,res) => {
     }
 
     const existingOperation =
-      await Operation.findById(
-        operation
-      ).session(session);
+      await Operation.findById(operation)
+        .session(session);
 
     if (!existingOperation) {
       await session.abortTransaction();
@@ -510,9 +582,24 @@ const createOperationPayment = async (req,res) => {
       });
     }
 
-    const remainingAmount =
+    const totalAmount =
       Number(
-        existingOperation.remainingAmount || 0
+        existingOperation.totalAmount || 0
+      );
+
+    const totalPaid =
+      await getCompletedPaymentsTotal(
+        {
+          operation:
+            existingOperation._id,
+        },
+        session
+      );
+
+    const remainingAmount =
+      Math.max(
+        totalAmount - totalPaid,
+        0
       );
 
     if (remainingAmount <= 0) {
@@ -526,7 +613,8 @@ const createOperationPayment = async (req,res) => {
     }
 
     if (
-      paymentAmount > remainingAmount
+      paymentAmount >
+      remainingAmount
     ) {
       await session.abortTransaction();
 
@@ -534,18 +622,20 @@ const createOperationPayment = async (req,res) => {
         success: false,
         message:
           "Payment amount exceeds remaining amount",
+        remainingAmount,
       });
     }
 
     const cashDrawer =
-      await getOpenCashDrawer();
+      await getOpenCashDrawer(session);
 
     if (!cashDrawer) {
       await session.abortTransaction();
 
       return res.status(400).json({
         success: false,
-        message: "No open cash drawer found",
+        message:
+          "No open cash drawer found",
       });
     }
 
@@ -553,9 +643,8 @@ const createOperationPayment = async (req,res) => {
       existingOperation.patient;
 
     const patient =
-      await Patient.findById(
-        patientId
-      ).session(session);
+      await Patient.findById(patientId)
+        .session(session);
 
     if (!patient) {
       await session.abortTransaction();
@@ -566,18 +655,13 @@ const createOperationPayment = async (req,res) => {
       });
     }
 
-    const oldPaidAmount =
-      Number(
-        existingOperation.paidAmount || 0
-      );
-
     const newPaidAmount =
-      oldPaidAmount + paymentAmount;
+      totalPaid + paymentAmount;
 
     const newRemainingAmount =
       Math.max(
-        0,
-        remainingAmount - paymentAmount
+        totalAmount - newPaidAmount,
+        0
       );
 
     existingOperation.paidAmount =
@@ -634,8 +718,9 @@ const createOperationPayment = async (req,res) => {
     });
 
     cashDrawer.expectedCash =
-      Number(cashDrawer.expectedCash || 0) +
-      paymentAmount;
+      Number(
+        cashDrawer.expectedCash || 0
+      ) + paymentAmount;
 
     await cashDrawer.save({
       session,
@@ -647,7 +732,7 @@ const createOperationPayment = async (req,res) => {
       await Payment.findById(payment._id)
         .populate(
           "operation",
-          "operationName operationDate totalAmount doctorFeeAmount hospitalAmount paidAmount remainingAmount paymentStatus status"
+          "patient doctor operationName operationDate totalAmount doctorFeeAmount hospitalAmount paidAmount remainingAmount paymentStatus status"
         )
         .populate(
           "patient",
@@ -667,6 +752,14 @@ const createOperationPayment = async (req,res) => {
       message:
         "Operation payment created successfully",
       data: populatedPayment,
+      summary: {
+        totalAmount,
+        paidAmount: newPaidAmount,
+        remainingAmount:
+          newRemainingAmount,
+        paymentStatus:
+          existingOperation.paymentStatus,
+      },
     });
   } catch (error) {
     await session.abortTransaction();
@@ -683,28 +776,33 @@ const createOperationPayment = async (req,res) => {
       error: error.message,
     });
   } finally {
-    session.endSession();
+    await session.endSession();
   }
 };
 
-const getAllPayments = async ( req, res) => {
+const getAllPayments = async (req, res) => {
   try {
-    const { type, sale, visit, operation, patient, status, fromDate, toDate, page = 1, limit = 20} = req.query;
+    const {
+      type,
+      sale,
+      visit,
+      operation,
+      patient,
+      status,
+      fromDate,
+      toDate,
+      page = 1,
+      limit = 20,
+    } = req.query;
 
     const filter = {};
 
     if (type) filter.type = type;
     if (sale) filter.sale = sale;
     if (visit) filter.visit = visit;
-    if (operation) {
-      filter.operation = operation;
-    }
-    if (patient) {
-      filter.patient = patient;
-    }
-    if (status) {
-      filter.status = status;
-    }
+    if (operation) filter.operation = operation;
+    if (patient) filter.patient = patient;
+    if (status) filter.status = status;
 
     if (fromDate || toDate) {
       filter.createdAt = {};
@@ -715,8 +813,7 @@ const getAllPayments = async ( req, res) => {
       }
 
       if (toDate) {
-        const endDate =
-          new Date(toDate);
+        const endDate = new Date(toDate);
 
         endDate.setHours(
           23,
@@ -730,9 +827,15 @@ const getAllPayments = async ( req, res) => {
       }
     }
 
+    const pageNumber =
+      Math.max(Number(page) || 1, 1);
+
+    const limitNumber =
+      Math.max(Number(limit) || 20, 1);
+
     const skip =
-      (Number(page) - 1) *
-      Number(limit);
+      (pageNumber - 1) *
+      limitNumber;
 
     const [
       payments,
@@ -767,7 +870,7 @@ const getAllPayments = async ( req, res) => {
           createdAt: -1,
         })
         .skip(skip)
-        .limit(Number(limit)),
+        .limit(limitNumber),
 
       Payment.countDocuments(filter),
     ]);
@@ -777,11 +880,12 @@ const getAllPayments = async ( req, res) => {
       payments,
       pagination: {
         total,
-        page: Number(page),
-        limit: Number(limit),
-        totalPages: Math.ceil(
-          total / Number(limit)
-        ),
+        page: pageNumber,
+        limit: limitNumber,
+        totalPages:
+          Math.ceil(
+            total / limitNumber
+          ),
       },
     });
   } catch (error) {
@@ -798,7 +902,7 @@ const getAllPayments = async ( req, res) => {
   }
 };
 
-const getSinglePayment = async ( req, res) => {
+const getSinglePayment = async (req, res) => {
   try {
     const payment =
       await Payment.findById(
@@ -854,15 +958,12 @@ const getSinglePayment = async ( req, res) => {
   }
 };
 
-const getSalePayments = async ( req, res) => {
+const getSalePayments = async (req, res) => {
   try {
-    const { saleId } =
-      req.params;
+    const { saleId } = req.params;
 
     const sale =
-      await Sale.findById(
-        saleId
-      );
+      await Sale.findById(saleId);
 
     if (!sale) {
       return res.status(404).json({
@@ -891,11 +992,23 @@ const getSalePayments = async ( req, res) => {
           createdAt: -1,
         });
 
+    const completedPayments =
+      payments.filter(
+        (payment) =>
+          payment.status === "completed"
+      );
+
     const totalPaid =
-      payments.reduce(
+      completedPayments.reduce(
         (sum, payment) =>
-          sum +
-          Number(payment.amount),
+          sum + Number(payment.amount || 0),
+        0
+      );
+
+    const remainingAmount =
+      Math.max(
+        Number(sale.totalAmount || 0) -
+          totalPaid,
         0
       );
 
@@ -903,12 +1016,16 @@ const getSalePayments = async ( req, res) => {
       success: true,
       sale,
       summary: {
+        totalAmount:
+          Number(sale.totalAmount || 0),
         totalPaid,
-        remainingAmount:
-          Number(sale.totalAmount || 0) -
-          totalPaid,
+        remainingAmount,
         paymentStatus:
-          sale.paymentStatus,
+          remainingAmount === 0
+            ? "paid"
+            : totalPaid > 0
+            ? "partial"
+            : "unpaid",
       },
       payments,
     });
@@ -927,14 +1044,12 @@ const getSalePayments = async ( req, res) => {
   }
 };
 
-const getVisitPayments = async (req,res) => {
+const getVisitPayments = async (req, res) => {
   try {
-    const { visitId } =req.params;
+    const { visitId } = req.params;
 
     const visit =
-      await Visit.findById(
-        visitId
-      );
+      await Visit.findById(visitId);
 
     if (!visit) {
       return res.status(404).json({
@@ -963,11 +1078,23 @@ const getVisitPayments = async (req,res) => {
           createdAt: -1,
         });
 
+    const completedPayments =
+      payments.filter(
+        (payment) =>
+          payment.status === "completed"
+      );
+
     const totalPaid =
-      payments.reduce(
+      completedPayments.reduce(
         (sum, payment) =>
-          sum +
-          Number(payment.amount),
+          sum + Number(payment.amount || 0),
+        0
+      );
+
+    const remainingAmount =
+      Math.max(
+        Number(visit.consultationFee || 0) -
+          totalPaid,
         0
       );
 
@@ -975,16 +1102,18 @@ const getVisitPayments = async (req,res) => {
       success: true,
       visit,
       summary: {
-        totalPaid,
-        remainingAmount:
-          Math.max(
-            0,
-            Number(
-              visit.consultationFee || 0
-            ) - totalPaid
+        totalAmount:
+          Number(
+            visit.consultationFee || 0
           ),
+        totalPaid,
+        remainingAmount,
         paymentStatus:
-          visit.paymentStatus,
+          remainingAmount === 0
+            ? "paid"
+            : totalPaid > 0
+            ? "partial"
+            : "unpaid",
       },
       payments,
     });
@@ -1003,11 +1132,12 @@ const getVisitPayments = async (req,res) => {
   }
 };
 
-const getOperationPayments = async (req,res) => {
+const getOperationPayments = async (
+  req,
+  res
+) => {
   try {
-    const {
-      operationId,
-    } = req.params;
+    const { operationId } = req.params;
 
     const operation =
       await Operation.findById(
@@ -1041,11 +1171,25 @@ const getOperationPayments = async (req,res) => {
           createdAt: -1,
         });
 
+    const completedPayments =
+      payments.filter(
+        (payment) =>
+          payment.status === "completed"
+      );
+
     const totalPaid =
-      payments.reduce(
+      completedPayments.reduce(
         (sum, payment) =>
-          sum +
-          Number(payment.amount),
+          sum + Number(payment.amount || 0),
+        0
+      );
+
+    const totalAmount =
+      Number(operation.totalAmount || 0);
+
+    const remainingAmount =
+      Math.max(
+        totalAmount - totalPaid,
         0
       );
 
@@ -1054,16 +1198,15 @@ const getOperationPayments = async (req,res) => {
       count: payments.length,
       data: payments,
       summary: {
+        totalAmount,
         totalPaid,
-        remainingAmount:
-          Math.max(
-            0,
-            Number(
-              operation.totalAmount || 0
-            ) - totalPaid
-          ),
+        remainingAmount,
         paymentStatus:
-          operation.paymentStatus,
+          remainingAmount === 0
+            ? "paid"
+            : totalPaid > 0
+            ? "partial"
+            : "unpaid",
       },
     });
   } catch (error) {
@@ -1081,15 +1224,15 @@ const getOperationPayments = async (req,res) => {
   }
 };
 
-const getPatientPayments = async (req,res) => {
+const getPatientPayments = async (
+  req,
+  res
+) => {
   try {
-    const { patientId } =
-      req.params;
+    const { patientId } = req.params;
 
     const patient =
-      await Patient.findById(
-        patientId
-      );
+      await Patient.findById(patientId);
 
     if (!patient) {
       return res.status(404).json({
@@ -1126,11 +1269,16 @@ const getPatientPayments = async (req,res) => {
           createdAt: -1,
         });
 
+    const completedPayments =
+      payments.filter(
+        (payment) =>
+          payment.status === "completed"
+      );
+
     const totalPaid =
-      payments.reduce(
+      completedPayments.reduce(
         (sum, payment) =>
-          sum +
-          Number(payment.amount),
+          sum + Number(payment.amount || 0),
         0
       );
 
@@ -1141,6 +1289,8 @@ const getPatientPayments = async (req,res) => {
         totalPaid,
         totalPayments:
           payments.length,
+        completedPayments:
+          completedPayments.length,
       },
       payments,
     });

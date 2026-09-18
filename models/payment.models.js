@@ -1,3 +1,4 @@
+
 const mongoose = require("mongoose");
 
 const { ObjectId } = mongoose.Schema.Types;
@@ -29,8 +30,8 @@ paymentSchema.pre("validate", function (next) {
 
   if (references.length !== 1) {
     return next(new Error("Payment must belong to exactly one of sale, visit, or operation"));
+  
   }
-
   if (this.sale) {
     this.type = "sale";
   } else if (this.visit) {

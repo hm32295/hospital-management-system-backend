@@ -71,7 +71,6 @@ app.use("/api/consultations", consultationRouter);
 app.use("/api/operations", operationRouter);
 app.use("/api/operation-payments", operationPaymentRouter);
 app.use("/api/cash-transactions", cashTransactionRouter);
-
 app.use("/api/doctor-settlements",doctorSettlementRouter);
 module.exports = app;
  

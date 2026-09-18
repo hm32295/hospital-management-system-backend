@@ -1,81 +1,106 @@
-const mongoose = require("mongoose");
-
 const doctorSettlementModels = require("../models/doctorSettlementModel");
 const operationModels = require("../models/operation.model");
 const cashDrawerModels = require("../models/cashDrawer.models");
 const cashTransactionModels = require("../models/cashTransaction.model");
+const doctorModel = require("../models/doctor.model");
 
 const createDoctorSettlement = async (req, res) => {
-  const session = await mongoose.startSession();
-
   try {
-    session.startTransaction();
+    const {doctor,operation,amount,notes = ""} = req.body;
 
-    const { operation, amount, notes } = req.body;
-
-    if (!operation || !amount) {
-      await session.abortTransaction();
-
+    if (!doctor || amount === undefined) {
       return res.status(400).json({
         success: false,
-        message: "Operation and amount are required",
+        message: "Doctor and amount are required",
       });
     }
 
-    if (amount <= 0) {
-      await session.abortTransaction();
+    const settlementAmount = Number(amount);
 
+    if (
+      !Number.isFinite(settlementAmount) ||
+      settlementAmount <= 0
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Settlement amount must be greater than zero",
+        message: "Amount must be greater than zero",
       });
     }
 
-    const existingOperation = await operationModels
-      .findById(operation)
-      .session(session);
+    const doctorExists =
+      await doctorModel.findById(doctor);
 
-    if (!existingOperation) {
-      await session.abortTransaction();
-
+    if (!doctorExists) {
       return res.status(404).json({
         success: false,
-        message: "Operation not found",
+        message: "Doctor not found",
       });
     }
 
-    if (existingOperation.status === "cancelled") {
-      await session.abortTransaction();
+    let operationExists = null;
 
-      return res.status(400).json({
-        success: false,
-        message: "Cannot settle doctor fee for a cancelled operation",
-      });
+    if (operation) {
+      operationExists =
+        await operationModels.findById(operation);
+
+      if (!operationExists) {
+        return res.status(404).json({
+          success: false,
+          message: "Operation not found",
+        });
+      }
+
+      if (
+        operationExists.doctor.toString() !==
+        doctor.toString()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "This operation does not belong to this doctor",
+        });
+      }
+
+      if (operationExists.status === "cancelled") {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Cancelled operation cannot be settled",
+        });
+      }
+
+      if (
+        Number(operationExists.doctorFeeAmount || 0) <= 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "This operation has no doctor fee",
+        });
+      }
     }
 
-    if (existingOperation.paymentStatus !== "paid") {
-      await session.abortTransaction();
-
-      return res.status(400).json({
-        success: false,
-        message: "Operation must be fully paid before doctor settlement",
+    const operations =
+      await operationModels.find({
+        doctor: doctorExists._id,
+        status: {
+          $ne: "cancelled",
+        },
       });
-    }
 
-    if (!existingOperation.doctorFeeAmount || existingOperation.doctorFeeAmount <= 0) {
-      await session.abortTransaction();
+    const totalEarned =
+      operations.reduce(
+        (total, item) =>
+          total +
+          Number(item.doctorFeeAmount || 0),
+        0
+      );
 
-      return res.status(400).json({
-        success: false,
-        message: "This operation has no doctor fee",
-      });
-    }
-
-    const previousSettlements = await doctorSettlementModels.aggregate(
-      [
+    const settlements =
+      await doctorSettlementModels.aggregate([
         {
           $match: {
-            operation: existingOperation._id,
+            doctor: doctorExists._id,
             status: "completed",
           },
         },
@@ -87,145 +112,216 @@ const createDoctorSettlement = async (req, res) => {
             },
           },
         },
-      ],
-      { session }
-    );
+      ]);
 
-    const paidToDoctor =
-      previousSettlements.length > 0
-        ? previousSettlements[0].totalPaid
+    const totalPaid =
+      settlements.length > 0
+        ? Number(settlements[0].totalPaid || 0)
         : 0;
 
-    const doctorRemaining =
-      existingOperation.doctorFeeAmount - paidToDoctor;
+    const doctorDue = Math.max(
+      totalEarned - totalPaid,
+      0
+    );
 
-    if (doctorRemaining <= 0) {
-      await session.abortTransaction();
-
+    if (settlementAmount > doctorDue) {
       return res.status(400).json({
         success: false,
-        message: "Doctor fee has already been fully settled",
+        message:
+          "Settlement amount exceeds doctor due",
+        totalEarned,
+        totalPaid,
+        due: doctorDue,
       });
     }
 
-    if (amount > doctorRemaining) {
-      await session.abortTransaction();
+    if (operationExists) {
+      const operationSettlements =
+        await doctorSettlementModels.aggregate([
+          {
+            $match: {
+              operation: operationExists._id,
+              status: "completed",
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              totalPaid: {
+                $sum: "$amount",
+              },
+            },
+          },
+        ]);
 
-      return res.status(400).json({
-        success: false,
-        message: `Settlement amount cannot exceed remaining doctor fee (${doctorRemaining})`,
-      });
+      const operationPaid =
+        operationSettlements.length > 0
+          ? Number(
+              operationSettlements[0].totalPaid || 0
+            )
+          : 0;
+
+      const operationDue = Math.max(
+        Number(
+          operationExists.doctorFeeAmount || 0
+        ) - operationPaid,
+        0
+      );
+
+      if (settlementAmount > operationDue) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Settlement amount exceeds operation doctor fee",
+          doctorFeeAmount:
+            operationExists.doctorFeeAmount,
+          paid: operationPaid,
+          due: operationDue,
+        });
+      }
     }
 
-    const cashDrawer = await cashDrawerModels
-      .findOne({
+    const cashDrawer =
+      await cashDrawerModels.findOne({
         status: "open",
-      })
-      .sort({ openedAt: -1 })
-      .session(session);
+      });
 
     if (!cashDrawer) {
-      await session.abortTransaction();
-
       return res.status(400).json({
         success: false,
-        message: "There is no open cash drawer",
+        message: "No open cash drawer",
       });
     }
 
-    const doctorSettlement = new doctorSettlementModels({
-      doctor: existingOperation.doctor,
-      operation: existingOperation._id,
-      patient: existingOperation.patient,
-      amount,
-      paidBy: req.user._id,
-      cashDrawer: cashDrawer._id,
-      status: "completed",
-      notes: notes || "",
-    });
+    const settlement =
+      await doctorSettlementModels.create({
+        doctor: doctorExists._id,
+        operation: operation || null,
+        patient:
+          operationExists?.patient || null,
+        amount: settlementAmount,
+        paidBy: req.user._id,
+        cashDrawer: cashDrawer._id,
+        status: "completed",
+        notes,
+      });
 
-    await doctorSettlement.save({ session });
-
-    const cashTransaction = new cashTransactionModels({
+    await cashTransactionModels.create({
       cashDrawer: cashDrawer._id,
       type: "expense",
       source: "doctor_settlement",
-      amount,
-      operation: existingOperation._id,
-      doctor: existingOperation.doctor,
-      patient: existingOperation.patient,
+      amount: settlementAmount,
+      operation: operation || null,
+      doctor: doctorExists._id,
+      patient:
+        operationExists?.patient || null,
       createdBy: req.user._id,
-      notes: notes || "",
+      notes,
     });
 
-    await cashTransaction.save({ session });
-
-    cashDrawer.expectedCash -= amount;
-
-    await cashDrawer.save({ session });
-
-    await session.commitTransaction();
-
-    const populatedSettlement = await doctorSettlementModels
-      .findById(doctorSettlement._id)
-      .populate("doctor", "name")
-      .populate(
-        "operation",
-        "operationName totalAmount doctorFeeAmount"
-      )
-      .populate("patient", "name phone")
-      .populate("paidBy", "name")
-      .populate(
-        "cashDrawer",
-        "openingBalance expectedCash status"
+    cashDrawer.expectedCash =
+      Math.max(
+        Number(cashDrawer.expectedCash || 0) -
+          settlementAmount,
+        0
       );
+
+    await cashDrawer.save();
+
+    const populatedSettlement =
+      await doctorSettlementModels
+        .findById(settlement._id)
+        .populate(
+          "doctor",
+          "name phone email"
+        )
+        .populate(
+          "operation",
+          "operationName totalAmount doctorFeeAmount"
+        )
+        .populate(
+          "patient",
+          "name phone"
+        )
+        .populate(
+          "paidBy",
+          "name email"
+        )
+        .populate(
+          "cashDrawer",
+          "openingBalance expectedCash status"
+        );
+
+    const newTotalPaid =
+      totalPaid + settlementAmount;
 
     return res.status(201).json({
       success: true,
-      message: "Doctor settlement created successfully",
-      data: populatedSettlement,
-      financial: {
-        doctorFee: existingOperation.doctorFeeAmount,
-        paidBefore: paidToDoctor,
-        paidNow: amount,
-        remaining: doctorRemaining - amount,
+      message:
+        "Doctor settlement created successfully",
+      settlement: populatedSettlement,
+      financialSummary: {
+        totalEarned,
+        totalPaid: newTotalPaid,
+        due: Math.max(
+          totalEarned - newTotalPaid,
+          0
+        ),
       },
     });
   } catch (error) {
-    await session.abortTransaction();
-
-    console.error("Create doctor settlement error:", error);
+    console.error(
+      "CREATE DOCTOR SETTLEMENT ERROR:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to create doctor settlement",
+      message: "Server error",
       error: error.message,
     });
-  } finally {
-    session.endSession();
   }
 };
 
-const getOperationSettlements = async (req, res) => {
+const getOperationSettlements = async (
+  req,
+  res
+) => {
   try {
     const { operationId } = req.params;
 
-    const settlements = await doctorSettlementModels
-      .find({
-        operation: operationId,
-      })
-      .populate("doctor", "name")
-      .populate("patient", "name phone")
-      .populate("paidBy", "name")
-      .populate(
-        "cashDrawer",
-        "openingBalance expectedCash status"
-      )
-      .sort({ createdAt: -1 });
+    const settlements =
+      await doctorSettlementModels
+        .find({
+          operation: operationId,
+        })
+        .populate("doctor", "name")
+        .populate(
+          "patient",
+          "name phone"
+        )
+        .populate(
+          "paidBy",
+          "name"
+        )
+        .populate(
+          "cashDrawer",
+          "openingBalance expectedCash status"
+        )
+        .sort({ createdAt: -1 });
 
-    const totalPaid = settlements
-      .filter((item) => item.status === "completed")
-      .reduce((total, item) => total + item.amount, 0);
+    const totalPaid =
+      settlements
+        .filter(
+          (item) =>
+            item.status === "completed"
+        )
+        .reduce(
+          (total, item) =>
+            total +
+            Number(item.amount || 0),
+          0
+        );
 
     return res.status(200).json({
       success: true,
@@ -234,39 +330,72 @@ const getOperationSettlements = async (req, res) => {
       data: settlements,
     });
   } catch (error) {
-    console.error("Get operation settlements error:", error);
+    console.error(
+      "Get operation settlements error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to get operation settlements",
+      message:
+        "Failed to get operation settlements",
       error: error.message,
     });
   }
 };
 
-const getDoctorSettlements = async (req, res) => {
+const getDoctorSettlements = async (
+  req,
+  res
+) => {
   try {
     const { doctorId } = req.params;
 
-    const settlements = await doctorSettlementModels
-      .find({
-        doctor: doctorId,
-      })
-      .populate(
-        "operation",
-        "operationName totalAmount doctorFeeAmount"
-      )
-      .populate("patient", "name phone")
-      .populate("paidBy", "name")
-      .populate(
-        "cashDrawer",
-        "openingBalance expectedCash status"
-      )
-      .sort({ createdAt: -1 });
+    const doctor =
+      await doctorModel.findById(doctorId);
 
-    const totalPaid = settlements
-      .filter((item) => item.status === "completed")
-      .reduce((total, item) => total + item.amount, 0);
+    if (!doctor) {
+      return res.status(404).json({
+        success: false,
+        message: "Doctor not found",
+      });
+    }
+
+    const settlements =
+      await doctorSettlementModels
+        .find({
+          doctor: doctorId,
+        })
+        .populate(
+          "operation",
+          "operationName totalAmount doctorFeeAmount operationDate"
+        )
+        .populate(
+          "patient",
+          "name phone"
+        )
+        .populate(
+          "paidBy",
+          "name"
+        )
+        .populate(
+          "cashDrawer",
+          "openingBalance expectedCash status"
+        )
+        .sort({ createdAt: -1 });
+
+    const totalPaid =
+      settlements
+        .filter(
+          (item) =>
+            item.status === "completed"
+        )
+        .reduce(
+          (total, item) =>
+            total +
+            Number(item.amount || 0),
+          0
+        );
 
     return res.status(200).json({
       success: true,
@@ -275,38 +404,56 @@ const getDoctorSettlements = async (req, res) => {
       data: settlements,
     });
   } catch (error) {
-    console.error("Get doctor settlements error:", error);
+    console.error(
+      "Get doctor settlements error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to get doctor settlements",
+      message:
+        "Failed to get doctor settlements",
       error: error.message,
     });
   }
 };
 
-const getSingleDoctorSettlement = async (req, res) => {
+const getSingleDoctorSettlement = async (
+  req,
+  res
+) => {
   try {
     const { id } = req.params;
 
-    const settlement = await doctorSettlementModels
-      .findById(id)
-      .populate("doctor", "name")
-      .populate(
-        "operation",
-        "operationName totalAmount doctorFeeAmount"
-      )
-      .populate("patient", "name phone")
-      .populate("paidBy", "name")
-      .populate(
-        "cashDrawer",
-        "openingBalance expectedCash status"
-      );
+    const settlement =
+      await doctorSettlementModels
+        .findById(id)
+        .populate(
+          "doctor",
+          "name"
+        )
+        .populate(
+          "operation",
+          "operationName totalAmount doctorFeeAmount operationDate"
+        )
+        .populate(
+          "patient",
+          "name phone"
+        )
+        .populate(
+          "paidBy",
+          "name"
+        )
+        .populate(
+          "cashDrawer",
+          "openingBalance expectedCash status"
+        );
 
     if (!settlement) {
       return res.status(404).json({
         success: false,
-        message: "Doctor settlement not found",
+        message:
+          "Doctor settlement not found",
       });
     }
 
@@ -315,20 +462,257 @@ const getSingleDoctorSettlement = async (req, res) => {
       data: settlement,
     });
   } catch (error) {
-    console.error("Get single doctor settlement error:", error);
+    console.error(
+      "Get single doctor settlement error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to get doctor settlement",
+      message:
+        "Failed to get doctor settlement",
       error: error.message,
     });
   }
 };
 
+
+const getDoctorAccount = async (req, res) => {
+  try {
+    const id = req.params.doctorId;
+
+    const doctor = await doctorModel
+      .findById(id)
+      .populate("specialties", "name");
+
+    if (!doctor) {
+      return res.status(404).json({
+        success: false,
+        message: "Doctor not found",
+      });
+    }
+
+    const operations = await operationModels
+      .find({
+        doctor: id,
+        status: { $ne: "cancelled" },
+      })
+      .populate("patient", "name phone")
+      .populate("specialty", "name")
+      .sort({
+        operationDate: 1,
+        createdAt: 1,
+      });
+
+    const settlements = await doctorSettlementModels
+      .find({
+        doctor: id,
+      })
+      .populate(
+        "operation",
+        "operationName operationDate doctorFeeAmount"
+      )
+      .populate("patient", "name phone")
+      .populate("paidBy", "name email")
+      .populate(
+        "cashDrawer",
+        "openingBalance expectedCash status"
+      )
+      .sort({
+        createdAt: 1,
+      });
+
+    const completedSettlements =
+      settlements.filter(
+        (settlement) =>
+          settlement.status === "completed"
+      );
+
+    const totalEarned = operations.reduce(
+      (total, operation) =>
+        total +
+        Number(operation.doctorFeeAmount || 0),
+      0
+    );
+
+    const totalPaid =
+      completedSettlements.reduce(
+        (total, settlement) =>
+          total + Number(settlement.amount || 0),
+        0
+      );
+
+    const due = Math.max(
+      totalEarned - totalPaid,
+      0
+    );
+
+    /*
+      Settlements linked directly to an operation
+      are counted against that operation first.
+    */
+    const linkedPayments = new Map();
+
+    completedSettlements.forEach(
+      (settlement) => {
+        if (!settlement.operation) return;
+
+        const operationId =
+          settlement.operation._id.toString();
+
+        const current =
+          linkedPayments.get(operationId) || 0;
+
+        linkedPayments.set(
+          operationId,
+          current +
+            Number(settlement.amount || 0)
+        );
+      }
+    );
+
+    /*
+      Centralized settlements have no operation.
+      We allocate them across operations in order.
+    */
+    let generalSettlementAmount =
+      completedSettlements
+        .filter(
+          (settlement) =>
+            !settlement.operation
+        )
+        .reduce(
+          (total, settlement) =>
+            total +
+            Number(settlement.amount || 0),
+          0
+        );
+
+    const operationAccount =
+      operations.map((operation) => {
+        const operationId =
+          operation._id.toString();
+
+        const doctorFeeAmount = Number(
+          operation.doctorFeeAmount || 0
+        );
+
+        const directlyPaid =
+          linkedPayments.get(operationId) ||
+          0;
+
+        const directRemaining = Math.max(
+          doctorFeeAmount - directlyPaid,
+          0
+        );
+
+        const allocatedGeneralPayment =
+          Math.min(
+            generalSettlementAmount,
+            directRemaining
+          );
+
+        generalSettlementAmount -=
+          allocatedGeneralPayment;
+
+        const operationDoctorPaid =
+          directlyPaid +
+          allocatedGeneralPayment;
+
+        const operationDoctorDue =
+          Math.max(
+            doctorFeeAmount -
+              operationDoctorPaid,
+            0
+          );
+
+        const doctorPaymentStatus =
+          operationDoctorDue === 0
+            ? "paid"
+            : operationDoctorPaid > 0
+            ? "partial"
+            : "unpaid";
+
+        return {
+          operation,
+
+          // Patient payment for the operation
+          patientPayment: {
+            paidAmount: Number(
+              operation.paidAmount || 0
+            ),
+            remainingAmount: Number(
+              operation.remainingAmount || 0
+            ),
+            paymentStatus:
+              operation.paymentStatus ||
+              "unpaid",
+          },
+
+          // Doctor payment for this operation
+          doctorPayment: {
+            feeAmount: doctorFeeAmount,
+            paidAmount: operationDoctorPaid,
+            remainingAmount:
+              operationDoctorDue,
+            paymentStatus:
+              doctorPaymentStatus,
+          },
+
+          // Keep old fields for frontend compatibility
+          doctorFeeAmount,
+
+          paidAmount:
+            operationDoctorPaid,
+
+          remainingAmount:
+            operationDoctorDue,
+
+          paymentStatus:
+            doctorPaymentStatus,
+        };
+      });
+
+    return res.status(200).json({
+      success: true,
+      doctor,
+
+      summary: {
+        totalEarned,
+        totalPaid,
+        due,
+      },
+
+      account: {
+        earned: totalEarned,
+        paid: totalPaid,
+        due,
+      },
+
+      operations: operationAccount,
+
+      settlements,
+    });
+  } catch (error) {
+    console.error(
+      "GET DOCTOR ACCOUNT ERROR:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+
+
 module.exports = {
   createDoctorSettlement,
+  getDoctorAccount,
   getOperationSettlements,
   getDoctorSettlements,
   getSingleDoctorSettlement,
 };
-// doctorSettlement.route
