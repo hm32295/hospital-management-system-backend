@@ -493,10 +493,7 @@ const getDoctorAccount = async (req, res) => {
     }
 
     const operations = await operationModels
-      .find({
-        doctor: id,
-        status: { $ne: "cancelled" },
-      })
+      .find({doctor: id, status: { $ne: "cancelled" }})
       .populate("patient", "name phone")
       .populate("specialty", "name")
       .sort({
@@ -505,18 +502,11 @@ const getDoctorAccount = async (req, res) => {
       });
 
     const settlements = await doctorSettlementModels
-      .find({
-        doctor: id,
-      })
-      .populate(
-        "operation",
-        "operationName operationDate doctorFeeAmount"
-      )
+      .find({ doctor: id,})
+      .populate( "operation","operationName operationDate doctorFeeAmount" )
       .populate("patient", "name phone")
       .populate("paidBy", "name email")
-      .populate(
-        "cashDrawer",
-        "openingBalance expectedCash status"
+      .populate( "cashDrawer","openingBalance expectedCash status"
       )
       .sort({
         createdAt: 1,

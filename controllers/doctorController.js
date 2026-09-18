@@ -96,12 +96,7 @@ const createDoctor = async (req, res) => {
 
 const getAllDoctors = async (req, res) => {
   try {
-    const {
-      search,
-      specialty,
-      page = 1,
-      limit = 10,
-    } = req.query;
+    const {search,specialty,page = 1,limit = 10} = req.query;
 
     const filter = {
       isActive: true,
@@ -136,10 +131,8 @@ const getAllDoctors = async (req, res) => {
         filter
       );
 
-    const doctors =
-      await doctorModels
-        .find(filter)
-        .populate("specialties", "name")
+    const doctors =await doctorModels.find(filter)
+      .populate("specialties", "name")
         .sort({ name: 1 })
         .skip(skip)
         .limit(limitNumber);

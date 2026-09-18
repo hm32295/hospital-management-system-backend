@@ -7,14 +7,16 @@ const operationModels = require("../models/operation.model");
 const paymentModels = require("../models/payment.models");
 
 const getAllPatient = async (req, res) => {
-
   try {
-    const {search,page = 1,limit = 10, } = req.query;
+    const { search, page = 1, limit = 10 } = req.query;
 
-    const filter = { isActive: true};
+    const filter = {
+      isActive: true,
+    };
 
     if (search?.trim()) {
       const searchValue = search.trim();
+
       filter.$or = [
         {
           name: {
@@ -62,11 +64,400 @@ const getAllPatient = async (req, res) => {
           createdAt: -1,
         })
         .skip(skip)
-        .limit(limitNumber);
+        .limit(limitNumber)
+        .lean();
+
+    if (!patients.length) {
+      return res.status(200).json({
+        success: true,
+        patients: [],
+        pagination: {
+          page: pageNumber,
+          limit: limitNumber,
+          total,
+          pages: Math.ceil(
+            total / limitNumber
+          ),
+        },
+      });
+    }
+
+    const patientIds =
+      patients.map(
+        (patient) => patient._id
+      );
+
+    /*
+      =========================
+      GET PATIENT TRANSACTIONS
+      =========================
+    */
+
+    const [
+      visits,
+      operations,
+      sales,
+    ] = await Promise.all([
+      visitModels
+        .find({
+          patient: {
+            $in: patientIds,
+          },
+        })
+        .select(
+          "_id patient consultationFee status"
+        )
+        .lean(),
+
+      operationModels
+        .find({
+          patient: {
+            $in: patientIds,
+          },
+        })
+        .select(
+          "_id patient totalAmount discount status"
+        )
+        .lean(),
+
+      saleModels
+        .find({
+          patient: {
+            $in: patientIds,
+          },
+        })
+        .select(
+          "_id patient totalAmount discount status"
+        )
+        .lean(),
+    ]);
+
+    /*
+      =========================
+      VALID TRANSACTIONS
+      =========================
+    */
+
+    const validVisits =
+      visits.filter(
+        (visit) =>
+          visit.status !== "cancelled"
+      );
+
+    const validOperations =
+      operations.filter(
+        (operation) =>
+          operation.status !== "cancelled"
+      );
+
+    const validSales =
+      sales.filter(
+        (sale) =>
+          sale.status !== "cancelled"
+      );
+
+    /*
+      =========================
+      TRANSACTION IDS
+      =========================
+    */
+
+    const visitIds =
+      validVisits.map(
+        (visit) => visit._id
+      );
+
+    const operationIds =
+      validOperations.map(
+        (operation) => operation._id
+      );
+
+    const saleIds =
+      validSales.map(
+        (sale) => sale._id
+      );
+
+    /*
+      =========================
+      GET PAYMENTS
+      =========================
+
+      We check both patient and
+      transaction references because
+      some old payments may have
+      patient = null.
+    */
+
+    const paymentConditions = [
+      {
+        patient: {
+          $in: patientIds,
+        },
+      },
+    ];
+
+    if (visitIds.length) {
+      paymentConditions.push({
+        visit: {
+          $in: visitIds,
+        },
+      });
+    }
+
+    if (operationIds.length) {
+      paymentConditions.push({
+        operation: {
+          $in: operationIds,
+        },
+      });
+    }
+
+    if (saleIds.length) {
+      paymentConditions.push({
+        sale: {
+          $in: saleIds,
+        },
+      });
+    }
+
+    const payments =
+      await paymentModels
+        .find({
+          status: "completed",
+          $or: paymentConditions,
+        })
+        .select(
+          "patient visit operation sale amount type"
+        )
+        .lean();
+
+    /*
+      =========================
+      CREATE ACCOUNT MAP
+      =========================
+    */
+
+    const accounts = new Map();
+
+    patientIds.forEach(
+      (patientId) => {
+        accounts.set(
+          patientId.toString(),
+          {
+            charges: 0,
+            paid: 0,
+            due: 0,
+          }
+        );
+      }
+    );
+
+    /*
+      =========================
+      ADD VISIT CHARGES
+      =========================
+    */
+
+    validVisits.forEach(
+      (visit) => {
+        const account =
+          accounts.get(
+            visit.patient.toString()
+          );
+
+        if (!account) return;
+
+        account.charges += Number(
+          visit.consultationFee || 0
+        );
+      }
+    );
+
+    /*
+      =========================
+      ADD OPERATION CHARGES
+      =========================
+    */
+
+    validOperations.forEach(
+      (operation) => {
+        const account =
+          accounts.get(
+            operation.patient.toString()
+          );
+
+        if (!account) return;
+
+        account.charges += Number(
+          operation.totalAmount || 0
+        );
+      }
+    );
+
+    /*
+      =========================
+      ADD SALES CHARGES
+      =========================
+    */
+
+    validSales.forEach(
+      (sale) => {
+        const account =
+          accounts.get(
+            sale.patient.toString()
+          );
+
+        if (!account) return;
+
+        account.charges += Number(
+          sale.totalAmount || 0
+        );
+      }
+    );
+
+    /*
+      =========================
+      MAP TRANSACTION -> PATIENT
+      =========================
+
+      This makes finding the patient
+      much faster than using .find()
+      for every payment.
+    */
+
+    const visitPatientMap =
+      new Map();
+
+    validVisits.forEach(
+      (visit) => {
+        visitPatientMap.set(
+          visit._id.toString(),
+          visit.patient.toString()
+        );
+      }
+    );
+
+    const operationPatientMap =
+      new Map();
+
+    validOperations.forEach(
+      (operation) => {
+        operationPatientMap.set(
+          operation._id.toString(),
+          operation.patient.toString()
+        );
+      }
+    );
+
+    const salePatientMap =
+      new Map();
+
+    validSales.forEach(
+      (sale) => {
+        salePatientMap.set(
+          sale._id.toString(),
+          sale.patient.toString()
+        );
+      }
+    );
+
+    /*
+      =========================
+      ADD PAYMENTS
+      =========================
+    */
+
+    payments.forEach(
+      (payment) => {
+        let patientId =
+          payment.patient
+            ? payment.patient.toString()
+            : null;
+
+        if (
+          !patientId &&
+          payment.visit
+        ) {
+          patientId =
+            visitPatientMap.get(
+              payment.visit.toString()
+            );
+        }
+
+        if (
+          !patientId &&
+          payment.operation
+        ) {
+          patientId =
+            operationPatientMap.get(
+              payment.operation.toString()
+            );
+        }
+
+        if (
+          !patientId &&
+          payment.sale
+        ) {
+          patientId =
+            salePatientMap.get(
+              payment.sale.toString()
+            );
+        }
+
+        if (!patientId) return;
+
+        const account =
+          accounts.get(patientId);
+
+        if (!account) return;
+
+        account.paid += Number(
+          payment.amount || 0
+        );
+      }
+    );
+
+    /*
+      =========================
+      CALCULATE DUE
+      =========================
+    */
+
+    accounts.forEach(
+      (account) => {
+        account.due = Math.max(
+          account.charges -
+            account.paid,
+          0
+        );
+      }
+    );
+
+    /*
+      =========================
+      ATTACH ACCOUNT
+      =========================
+    */
+
+    const patientsWithAccounts =
+      patients.map(
+        (patient) => ({
+          ...patient,
+          account:
+            accounts.get(
+              patient._id.toString()
+            ) || {
+              charges: 0,
+              paid: 0,
+              due: 0,
+            },
+        })
+      );
 
     return res.status(200).json({
       success: true,
-      patients,
+      patients:
+        patientsWithAccounts,
       pagination: {
         page: pageNumber,
         limit: limitNumber,
@@ -84,44 +475,14 @@ const getAllPatient = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Failed to get patients",
+      message:
+        "Failed to get patients",
       error: error.message,
     });
   }
 };
 
-const getSinglePatient = async (req, res) => {
-  try {
-    const patient =
-      await patientModels.findOne({
-        _id: req.params.id,
-        isActive: true,
-      });
 
-    if (!patient) {
-      return res.status(404).json({
-        success: false,
-        message: "Patient not found",
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      patient,
-    });
-  } catch (error) {
-    console.error(
-      "Get single patient error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to get patient",
-      error: error.message,
-    });
-  }
-};
 const getPatientDetails = async (req, res) => {
   try {
     const { id } = req.params;
