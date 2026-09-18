@@ -1,6 +1,8 @@
 
 const doctorModels = require("../models/doctor.model");
 const specialtyModels = require("../models/specialty.model");
+const doctorSettlementModels = require("../models/doctorSettlementModel");
+const operationModels = require('../models/operation.model')
 
 const createDoctor = async (req, res) => {
   try {
@@ -94,9 +96,15 @@ const createDoctor = async (req, res) => {
   }
 };
 
+
 const getAllDoctors = async (req, res) => {
   try {
-    const {search,specialty,page = 1,limit = 10} = req.query;
+    const {
+      search,
+      specialty,
+      page = 1,
+      limit = 10,
+    } = req.query;
 
     const filter = {
       isActive: true,
@@ -131,15 +139,190 @@ const getAllDoctors = async (req, res) => {
         filter
       );
 
-    const doctors =await doctorModels.find(filter)
-      .populate("specialties", "name")
+    const doctors =
+      await doctorModels
+        .find(filter)
+        .populate("specialties", "name")
         .sort({ name: 1 })
         .skip(skip)
-        .limit(limitNumber);
+        .limit(limitNumber)
+        .lean();
+
+    if (!doctors.length) {
+      return res.status(200).json({
+        success: true,
+        doctors: [],
+        pagination: {
+          page: pageNumber,
+          limit: limitNumber,
+          total,
+          pages: Math.ceil(
+            total / limitNumber
+          ),
+        },
+      });
+    }
+
+    const doctorIds =
+      doctors.map(
+        (doctor) => doctor._id
+      );
+
+    /*
+      =========================
+      GET DOCTOR OPERATIONS
+      =========================
+    */
+
+    const operations =
+      await operationModels
+        .find({
+          doctor: {
+            $in: doctorIds,
+          },
+          status: {
+            $ne: "cancelled",
+          },
+        })
+        .select(
+          "doctor doctorFeeAmount"
+        )
+        .lean();
+
+    /*
+      =========================
+      GET DOCTOR SETTLEMENTS
+      =========================
+
+      Only completed settlements
+      count as money paid to doctor.
+    */
+
+    const settlements =
+      await doctorSettlementModels
+        .find({
+          doctor: {
+            $in: doctorIds,
+          },
+          status: "completed",
+        })
+        .select(
+          "doctor amount"
+        )
+        .lean();
+
+    /*
+      =========================
+      CREATE ACCOUNT MAP
+      =========================
+    */
+
+    const accounts = new Map();
+
+    doctorIds.forEach(
+      (doctorId) => {
+        accounts.set(
+          doctorId.toString(),
+          {
+            earned: 0,
+            paid: 0,
+            due: 0,
+          }
+        );
+      }
+    );
+
+    /*
+      =========================
+      CALCULATE EARNED
+      =========================
+    */
+
+    operations.forEach(
+      (operation) => {
+        if (!operation.doctor) {
+          return;
+        }
+
+        const account =
+          accounts.get(
+            operation.doctor.toString()
+          );
+
+        if (!account) return;
+
+        account.earned += Number(
+          operation.doctorFeeAmount || 0
+        );
+      }
+    );
+
+    /*
+      =========================
+      CALCULATE PAID
+      =========================
+    */
+
+    settlements.forEach(
+      (settlement) => {
+        if (!settlement.doctor) {
+          return;
+        }
+
+        const account =
+          accounts.get(
+            settlement.doctor.toString()
+          );
+
+        if (!account) return;
+
+        account.paid += Number(
+          settlement.amount || 0
+        );
+      }
+    );
+
+    /*
+      =========================
+      CALCULATE DUE
+      =========================
+    */
+
+    accounts.forEach(
+      (account) => {
+        account.due = Math.max(
+          account.earned -
+            account.paid,
+          0
+        );
+      }
+    );
+
+    /*
+      =========================
+      ATTACH ACCOUNT
+      =========================
+    */
+
+    const doctorsWithAccounts =
+      doctors.map(
+        (doctor) => ({
+          ...doctor,
+          account:
+            accounts.get(
+              doctor._id.toString()
+            ) || {
+              earned: 0,
+              paid: 0,
+              due: 0,
+            },
+        })
+      );
 
     return res.status(200).json({
       success: true,
-      doctors,
+      doctors:
+        doctorsWithAccounts,
       pagination: {
         page: pageNumber,
         limit: limitNumber,
@@ -162,6 +345,7 @@ const getAllDoctors = async (req, res) => {
     });
   }
 };
+
 
 const getSingleDoctor = async (req, res) => {
   try {

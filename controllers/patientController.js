@@ -482,7 +482,38 @@ const getAllPatient = async (req, res) => {
   }
 };
 
+const getSinglePatient = async (req, res) => {
+  try {
+    const patient =
+      await patientModels.findOne({
+        _id: req.params.id,
+        isActive: true,
+      });
 
+    if (!patient) {
+      return res.status(404).json({
+        success: false,
+        message: "Patient not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      patient,
+    });
+  } catch (error) {
+    console.error(
+      "Get single patient error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to get patient",
+      error: error.message,
+    });
+  }
+};
 const getPatientDetails = async (req, res) => {
   try {
     const { id } = req.params;
