@@ -96,7 +96,7 @@ const createDoctor = async (req, res) => {
   }
 };
 
-
+ 
 const getAllDoctors = async (req, res) => {
   try {
     const {
