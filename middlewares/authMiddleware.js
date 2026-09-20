@@ -8,7 +8,7 @@ const protect = async (req, res, next) => {
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return res.status(401).json({
         success: false,
-        message: "Not authorized, token is missing",
+       message: req.t("common.tokenMissing"),
       });
     }
 
@@ -19,14 +19,14 @@ const protect = async (req, res, next) => {
     if (!user) {
       return res.status(401).json({
         success: false,
-        message: "User not found",
+        message: req.t('common.userNotFound'),
       });
     }
 
     if (!user.isActive) {
       return res.status(403).json({
         success: false,
-        message: "User account is inactive",
+        message: req.t('common.accountInactive'),
       });
     }
 
@@ -36,7 +36,7 @@ const protect = async (req, res, next) => {
   } catch (error) {
     return res.status(401).json({
       success: false,
-      message: "Not authorized, invalid or expired token",
+      message: req.t("common.invalidOrExpiredToken"),
     });
   }
 };

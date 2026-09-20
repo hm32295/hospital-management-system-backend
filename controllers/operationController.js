@@ -1,9 +1,88 @@
+
+const mongoose = require("mongoose");
 const operationModels = require("../models/operation.model");
 const patientModels = require("../models/patient.models");
 const specialtyModels = require("../models/specialty.model");
 const doctorModel = require("../models/doctor.model");
 const paymentModels = require("../models/payment.models");
 const doctorSettlementModels = require("../models/doctorSettlementModel");
+
+const { ObjectId } = mongoose.Types;
+
+const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+const roundAmount = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+
+const getOperationPopulate = (query) =>
+  query
+    .populate("patient", "name phone")
+    .populate("doctor", "name email")
+    .populate("specialty", "name");
+
+const validateOperationReferences = async ({ patient, doctor, specialty }) => {
+  const [patientExists, doctorExists, specialtyExists] = await Promise.all([
+    patientModels.findById(patient),
+    doctorModel.findById(doctor),
+    specialtyModels.findById(specialty),
+  ]);
+
+  return { patientExists, doctorExists, specialtyExists };
+};
+
+const calculateOperationFinancials = ({ cost, discount, doctorFeeType, doctorFeeValue }) => {
+  const numericCost = Number(cost);
+  const numericDiscount = Number(discount);
+  const numericDoctorFeeValue = Number(doctorFeeValue);
+
+  if (!Number.isFinite(numericCost) || numericCost < 0) {
+    return { error: "invalidCost" };
+  }
+
+  if (!Number.isFinite(numericDiscount) || numericDiscount < 0) {
+    return { error: "invalidDiscount" };
+  }
+
+  if (numericDiscount > numericCost) {
+    return { error: "discountGreaterThanCost" };
+  }
+
+  if (!["none", "fixed", "percentage"].includes(doctorFeeType)) {
+    return { error: "invalidDoctorFeeType" };
+  }
+
+  if (!Number.isFinite(numericDoctorFeeValue) || numericDoctorFeeValue < 0) {
+    return { error: "invalidDoctorFeeValue" };
+  }
+
+  if (doctorFeeType === "percentage" && numericDoctorFeeValue > 100) {
+    return { error: "doctorFeePercentageExceeded" };
+  }
+
+  const totalAmount = roundAmount(numericCost - numericDiscount);
+  let doctorFeeAmount = 0;
+
+  if (doctorFeeType === "fixed") {
+    doctorFeeAmount = roundAmount(numericDoctorFeeValue);
+  }
+
+  if (doctorFeeType === "percentage") {
+    doctorFeeAmount = roundAmount((totalAmount * numericDoctorFeeValue) / 100);
+  }
+
+  if (doctorFeeAmount > totalAmount) {
+    return { error: "doctorFeeGreaterThanTotal" };
+  }
+
+  return {
+    cost: roundAmount(numericCost),
+    discount: roundAmount(numericDiscount),
+    totalAmount,
+    doctorFeeType,
+    doctorFeeValue: roundAmount(numericDoctorFeeValue),
+    doctorFeeAmount,
+    hospitalAmount: roundAmount(totalAmount - doctorFeeAmount),
+  };
+};
 
 const createOperation = async (req, res) => {
   try {
@@ -20,200 +99,129 @@ const createOperation = async (req, res) => {
       notes = "",
     } = req.body;
 
-    if (
-      !patient ||
-      !doctor ||
-      !specialty ||
-      !operationName ||
-      cost === undefined
-    ) {
+    if (!patient || !doctor || !specialty || !operationName || cost === undefined) {
       return res.status(400).json({
         success: false,
-        message:
-          "Patient, doctor, specialty, operation name and cost are required",
+        message: req.t("operations.requiredFields"),
       });
     }
 
-    const patientExists =
-      await patientModels.findById(patient);
+    if (!isValidId(patient)) {
+      return res.status(400).json({ success: false, message: req.t("operations.invalidPatientId") });
+    }
+
+    if (!isValidId(doctor)) {
+      return res.status(400).json({ success: false, message: req.t("operations.invalidDoctorId") });
+    }
+
+    if (!isValidId(specialty)) {
+      return res.status(400).json({ success: false, message: req.t("operations.invalidSpecialtyId") });
+    }
+
+    if (typeof operationName !== "string" || !operationName.trim()) {
+      return res.status(400).json({ success: false, message: req.t("operations.invalidOperationName") });
+    }
+
+    if (notes !== undefined && typeof notes !== "string") {
+      return res.status(400).json({ success: false, message: req.t("operations.invalidNotes") });
+    }
+
+    let parsedDate = new Date();
+
+    if (operationDate !== undefined) {
+      parsedDate = new Date(operationDate);
+
+      if (Number.isNaN(parsedDate.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("operations.invalidOperationDate"),
+        });
+      }
+    }
+
+    const { patientExists, doctorExists, specialtyExists } =
+      await validateOperationReferences({ patient, doctor, specialty });
 
     if (!patientExists) {
-      return res.status(404).json({
-        success: false,
-        message: "Patient not found",
-      });
+      return res.status(404).json({ success: false, message: req.t("operations.patientNotFound") });
     }
-
-    const doctorExists =
-      await doctorModel.findById(doctor);
 
     if (!doctorExists) {
-      return res.status(404).json({
-        success: false,
-        message: "Doctor not found",
-      });
+      return res.status(404).json({ success: false, message: req.t("operations.doctorNotFound") });
     }
 
-    const specialtyExists =
-      await specialtyModels.findById(specialty);
+    if (!doctorExists.isActive) {
+      return res.status(400).json({ success: false, message: req.t("operations.doctorInactive") });
+    }
 
     if (!specialtyExists) {
-      return res.status(404).json({
-        success: false,
-        message: "Specialty not found",
-      });
+      return res.status(404).json({ success: false, message: req.t("operations.specialtyNotFound") });
     }
 
-    const numericCost = Number(cost);
-    const numericDiscount = Number(discount);
-    const numericDoctorFeeValue =
-      Number(doctorFeeValue);
+    if (!specialtyExists.isActive) {
+      return res.status(400).json({ success: false, message: req.t("operations.specialtyInactive") });
+    }
 
-    if (
-      !Number.isFinite(numericCost) ||
-      numericCost < 0
-    ) {
+    const hasSpecialty = doctorExists.specialties.some(
+      (item) => item.toString() === specialty.toString()
+    );
+
+    if (!hasSpecialty) {
       return res.status(400).json({
         success: false,
-        message: "Cost cannot be negative",
+        message: req.t("operations.doctorSpecialtyMismatch"),
       });
     }
 
-    if (
-      !Number.isFinite(numericDiscount) ||
-      numericDiscount < 0
-    ) {
+    const financials = calculateOperationFinancials({
+      cost,
+      discount,
+      doctorFeeType,
+      doctorFeeValue,
+    });
+
+    if (financials.error) {
       return res.status(400).json({
         success: false,
-        message: "Discount cannot be negative",
+        message: req.t(`operations.${financials.error}`),
       });
     }
 
-    if (numericDiscount > numericCost) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Discount cannot be greater than cost",
-      });
-    }
+    const operation = await operationModels.create({
+      patient,
+      doctor,
+      specialty,
+      operationName: operationName.trim(),
+      operationDate: parsedDate,
+      cost: financials.cost,
+      discount: financials.discount,
+      totalAmount: financials.totalAmount,
+      doctorFeeType: financials.doctorFeeType,
+      doctorFeeValue: financials.doctorFeeValue,
+      doctorFeeAmount: financials.doctorFeeAmount,
+      hospitalAmount: financials.hospitalAmount,
+      paidAmount: 0,
+      remainingAmount: financials.totalAmount,
+      paymentStatus: "unpaid",
+      status: "pending",
+      notes: notes.trim(),
+      createdBy: req.user._id,
+    });
 
-    if (
-      !["none", "fixed", "percentage"].includes(
-        doctorFeeType
-      )
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid doctor fee type",
-      });
-    }
-
-    if (
-      !Number.isFinite(numericDoctorFeeValue) ||
-      numericDoctorFeeValue < 0
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Doctor fee cannot be negative",
-      });
-    }
-
-    if (
-      doctorFeeType === "percentage" &&
-      numericDoctorFeeValue > 100
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Doctor fee percentage cannot exceed 100",
-      });
-    }
-
-    const totalAmount =
-      numericCost - numericDiscount;
-
-    let doctorFeeAmount = 0;
-
-    if (doctorFeeType === "fixed") {
-      doctorFeeAmount =
-        numericDoctorFeeValue;
-    }
-
-    if (doctorFeeType === "percentage") {
-      doctorFeeAmount =
-        (totalAmount *
-          numericDoctorFeeValue) /
-        100;
-    }
-
-    if (doctorFeeAmount > totalAmount) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Doctor fee cannot be greater than operation amount",
-      });
-    }
-
-    const hospitalAmount =
-      totalAmount - doctorFeeAmount;
-
-    const operation =
-      await operationModels.create({
-        patient,
-        doctor,
-        specialty,
-        operationName,
-        operationDate:
-          operationDate || new Date(),
-        cost: numericCost,
-        discount: numericDiscount,
-        totalAmount,
-        doctorFeeType,
-        doctorFeeValue:
-          numericDoctorFeeValue,
-        doctorFeeAmount,
-        hospitalAmount,
-        paidAmount: 0,
-        remainingAmount: totalAmount,
-        paymentStatus: "unpaid",
-        status: "pending",
-        notes,
-        createdBy: req.user._id,
-      });
-
-    const populatedOperation =
-      await operationModels
-        .findById(operation._id)
-        .populate(
-          "patient",
-          "name phone"
-        )
-        .populate(
-          "doctor",
-          "name email"
-        )
-        .populate(
-          "specialty",
-          "name"
-        );
+    const populatedOperation = await getOperationPopulate(
+      operationModels.findById(operation._id)
+    );
 
     return res.status(201).json({
       success: true,
-      message:
-        "Operation created successfully",
+      message: req.t("operations.createdSuccessfully"),
       operation: populatedOperation,
     });
   } catch (error) {
-    console.error(
-      "CREATE OPERATION ERROR:",
-      error
-    );
-
+    console.error("CREATE OPERATION ERROR:", error);
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("operations.createFailed"),
     });
   }
 };
@@ -231,73 +239,93 @@ const getAllOperations = async (req, res) => {
       limit = 10,
     } = req.query;
 
-    const filter = {};
 
-    if (patient) {
-      filter.patient = patient;
+    const pageNumber = Number(page);
+    const limitNumber = Number(limit);
+
+    if (!Number.isInteger(pageNumber) || pageNumber < 1) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("operations.invalidPage"),
+      });
     }
 
-    if (doctor) {
+
+    if (!Number.isInteger(limitNumber) || limitNumber < 1 || limitNumber > 100) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("operations.invalidLimit"),
+      });
+    }
+
+    const filter = {};
+    if (patient !== undefined && patient !== "") {
+    
+      if (!isValidId(patient)) {
+        return res.status(400).json({ success: false, message: req.t("operations.invalidPatientId") });
+      }
+      filter.patient = patient;
+    }
+    if (doctor !== undefined && doctor !== "") {
+      if (!isValidId(doctor)) {
+        return res.status(400).json({ success: false, message: req.t("operations.invalidDoctorId") });
+      }
       filter.doctor = doctor;
     }
 
-    if (specialty) {
+    if (specialty !== undefined && specialty !== "") {
+      if (!isValidId(specialty)) {
+        return res.status(400).json({ success: false, message: req.t("operations.invalidSpecialtyId") });
+      }
       filter.specialty = specialty;
     }
 
-    if (status) {
+    if (status !== undefined && status !== "") {
+      if (!["pending", "completed", "cancelled"].includes(status)) {
+        return res.status(400).json({ success: false, message: req.t("operations.invalidStatus") });
+      }
       filter.status = status;
     }
 
-    if (paymentStatus) {
+    if (paymentStatus !== undefined && paymentStatus !== "") {
+      if (!["unpaid", "partial", "paid"].includes(paymentStatus)) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("operations.invalidPaymentStatus"),
+        });
+      }
       filter.paymentStatus = paymentStatus;
     }
 
-    if (search?.trim()) {
-      filter.operationName = {
-        $regex: search.trim(),
-        $options: "i",
-      };
+    if (search !== undefined && search !== "") {
+      if (typeof search !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: req.t("operations.invalidSearch"),
+        });
+      }
+
+      if (search.trim()) {
+        filter.operationName = {
+          $regex: search.trim(),
+          $options: "i",
+        };
+      }
     }
 
-    const pageNumber = Math.max(
-      Number(page) || 1,
-      1
-    );
+    const skip = (pageNumber - 1) * limitNumber;
+    
 
-    const limitNumber = Math.min(
-      Math.max(Number(limit) || 10, 1),
-      100
-    );
-
-    const skip =
-      (pageNumber - 1) * limitNumber;
-
-    const total =
-      await operationModels.countDocuments(
-        filter
-      );
-
-    const operations =
-      await operationModels
-        .find(filter)
-        .populate(
-          "patient",
-          "name phone"
-        )
-        .populate(
-          "doctor",
-          "name email"
-        )
-        .populate(
-          "specialty",
-          "name"
-        )
-        .sort({
-          operationDate: -1,
-        })
-        .skip(skip)
-        .limit(limitNumber);
+    const [total, operations] = await Promise.all([
+      operationModels.countDocuments(filter),
+      getOperationPopulate(
+        operationModels
+          .find(filter)
+          .sort({ operationDate: -1 })
+          .skip(skip)
+          .limit(limitNumber)
+      ),
+    ]);
 
     return res.status(200).json({
       success: true,
@@ -306,54 +334,39 @@ const getAllOperations = async (req, res) => {
         page: pageNumber,
         limit: limitNumber,
         total,
-        pages: Math.ceil(
-          total / limitNumber
-        ),
+        pages: Math.ceil(total / limitNumber),
       },
     });
   } catch (error) {
-    console.error(
-      "GET ALL OPERATIONS ERROR:",
-      error
-    );
-
+    console.error("GET ALL OPERATIONS ERROR:", error);
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("operations.fetchFailed"),
     });
   }
 };
 
-const getSingleOperation = async (
-  req,
-  res
-) => {
+const getSingleOperation = async (req, res) => {
   try {
-    const operation =
-      await operationModels
-        .findById(req.params.id)
-        .populate(
-          "patient",
-          "name phone"
-        )
-        .populate(
-          "doctor",
-          "name email"
-        )
-        .populate(
-          "specialty",
-          "name"
-        )
-        .populate(
-          "createdBy",
-          "name email"
-        );
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("operations.invalidId"),
+      });
+    }
+
+    const operation = await getOperationPopulate(
+      operationModels
+        .findById(id)
+        .populate("createdBy", "name email")
+    );
 
     if (!operation) {
       return res.status(404).json({
         success: false,
-        message: "Operation not found",
+        message: req.t("operations.notFound"),
       });
     }
 
@@ -362,115 +375,93 @@ const getSingleOperation = async (
       operation,
     });
   } catch (error) {
-    console.error(
-      "GET SINGLE OPERATION ERROR:",
-      error
-    );
-
+    console.error("GET SINGLE OPERATION ERROR:", error);
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("operations.fetchFailed"),
     });
   }
 };
 
-const completeOperation = async (
-  req,
-  res
-) => {
+const completeOperation = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const operation =
-      await operationModels.findById(id);
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("operations.invalidId"),
+      });
+    }
+
+    const operation = await operationModels.findById(id);
 
     if (!operation) {
       return res.status(404).json({
         success: false,
-        message: "Operation not found",
+        message: req.t("operations.notFound"),
       });
     }
 
     if (operation.status === "cancelled") {
       return res.status(400).json({
         success: false,
-        message:
-          "Cancelled operation cannot be completed",
+        message: req.t("operations.cancelledCannotComplete"),
       });
     }
 
     if (operation.status === "completed") {
       return res.status(400).json({
         success: false,
-        message:
-          "Operation is already completed",
+        message: req.t("operations.alreadyCompleted"),
       });
     }
 
     operation.status = "completed";
-
     await operation.save();
 
-    const updatedOperation =
-      await operationModels
-        .findById(operation._id)
-        .populate(
-          "patient",
-          "name phone"
-        )
-        .populate(
-          "doctor",
-          "name"
-        )
-        .populate(
-          "specialty",
-          "name"
-        );
+    const updatedOperation = await getOperationPopulate(
+      operationModels.findById(operation._id)
+    );
 
     return res.status(200).json({
       success: true,
-      message:
-        "Operation completed successfully",
+      message: req.t("operations.completedSuccessfully"),
       operation: updatedOperation,
     });
   } catch (error) {
-    console.error(
-      "COMPLETE OPERATION ERROR:",
-      error
-    );
-
+    console.error("COMPLETE OPERATION ERROR:", error);
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to complete operation",
-      error: error.message,
+      message: req.t("operations.completeFailed"),
     });
   }
 };
 
-const updateOperation = async (
-  req,
-  res
-) => {
+const updateOperation = async (req, res) => {
   try {
-    const operation =
-      await operationModels.findById(
-        req.params.id
-      );
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("operations.invalidId"),
+      });
+    }
+
+    const operation = await operationModels.findById(id);
 
     if (!operation) {
       return res.status(404).json({
         success: false,
-        message: "Operation not found",
+        message: req.t("operations.notFound"),
       });
     }
 
     if (operation.status === "cancelled") {
       return res.status(400).json({
         success: false,
-        message:
-          "Cancelled operation cannot be updated",
+        message: req.t("operations.cancelledCannotUpdate"),
       });
     }
 
@@ -488,45 +479,45 @@ const updateOperation = async (
       notes,
     } = req.body;
 
-    const paymentExists =
-      await paymentModels.exists({
+    const [paymentExists, settlementExists] = await Promise.all([
+      paymentModels.exists({
         operation: operation._id,
         status: "completed",
-      });
-
-    const settlementExists =
-      await doctorSettlementModels.exists({
+      }),
+      doctorSettlementModels.exists({
         operation: operation._id,
         status: "completed",
-      });
+      }),
+    ]);
 
     if (
       settlementExists &&
-      (
-        doctor !== undefined ||
+      (doctor !== undefined ||
         cost !== undefined ||
         discount !== undefined ||
         doctorFeeType !== undefined ||
-        doctorFeeValue !== undefined
-      )
+        doctorFeeValue !== undefined)
     ) {
       return res.status(400).json({
         success: false,
-        message:
-          "Operation financial data cannot be changed after doctor settlement",
+        message: req.t("operations.financialDataLocked"),
       });
     }
 
     if (patient !== undefined) {
-      const exists =
-        await patientModels.findById(
-          patient
-        );
+      if (!isValidId(patient)) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("operations.invalidPatientId"),
+        });
+      }
+
+      const exists = await patientModels.findById(patient);
 
       if (!exists) {
         return res.status(404).json({
           success: false,
-          message: "Patient not found",
+          message: req.t("operations.patientNotFound"),
         });
       }
 
@@ -534,27 +525,26 @@ const updateOperation = async (
     }
 
     if (doctor !== undefined) {
-      const exists =
-        await doctorModel.findById(
-          doctor
-        );
+      if (!isValidId(doctor)) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("operations.invalidDoctorId"),
+        });
+      }
+
+      const exists = await doctorModel.findById(doctor);
 
       if (!exists) {
         return res.status(404).json({
           success: false,
-          message: "Doctor not found",
+          message: req.t("operations.doctorNotFound"),
         });
       }
 
-      if (
-        operation.doctor.toString() !==
-        doctor.toString() &&
-        settlementExists
-      ) {
+      if (!exists.isActive) {
         return res.status(400).json({
           success: false,
-          message:
-            "Doctor cannot be changed after settlement",
+          message: req.t("operations.doctorInactive"),
         });
       }
 
@@ -562,241 +552,161 @@ const updateOperation = async (
     }
 
     if (specialty !== undefined) {
-      const exists =
-        await specialtyModels.findById(
-          specialty
-        );
+      if (!isValidId(specialty)) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("operations.invalidSpecialtyId"),
+        });
+      }
+
+      const exists = await specialtyModels.findById(specialty);
 
       if (!exists) {
         return res.status(404).json({
           success: false,
-          message: "Specialty not found",
+          message: req.t("operations.specialtyNotFound"),
+        });
+      }
+
+      if (!exists.isActive) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("operations.specialtyInactive"),
         });
       }
 
       operation.specialty = specialty;
     }
 
+    const doctorExists = await doctorModel.findById(operation.doctor);
+
+    if (!doctorExists) {
+      return res.status(404).json({
+        success: false,
+        message: req.t("operations.doctorNotFound"),
+      });
+    }
+
+    if (!doctorExists.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("operations.doctorInactive"),
+      });
+    }
+
+    const specialtyExists = await specialtyModels.findById(operation.specialty);
+
+    if (!specialtyExists) {
+      return res.status(404).json({
+        success: false,
+        message: req.t("operations.specialtyNotFound"),
+      });
+    }
+
+    if (!specialtyExists.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("operations.specialtyInactive"),
+      });
+    }
+
+    if (
+      !doctorExists.specialties.some(
+        (item) => item.toString() === operation.specialty.toString()
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("operations.doctorSpecialtyMismatch"),
+      });
+    }
+
     if (operationName !== undefined) {
-      operation.operationName =
-        operationName;
+      if (typeof operationName !== "string" || !operationName.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("operations.invalidOperationName"),
+        });
+      }
+
+      operation.operationName = operationName.trim();
     }
 
     if (operationDate !== undefined) {
-      const date =
-        new Date(operationDate);
+      const date = new Date(operationDate);
 
-      if (isNaN(date.getTime())) {
+      if (Number.isNaN(date.getTime())) {
         return res.status(400).json({
           success: false,
-          message:
-            "Invalid operation date",
+          message: req.t("operations.invalidOperationDate"),
         });
       }
 
       operation.operationDate = date;
     }
 
-    if (cost !== undefined) {
-      const numericCost =
-        Number(cost);
+    const nextCost = cost !== undefined ? cost : operation.cost;
+    const nextDiscount = discount !== undefined ? discount : operation.discount;
+    const nextDoctorFeeType =
+      doctorFeeType !== undefined ? doctorFeeType : operation.doctorFeeType;
+    const nextDoctorFeeValue =
+      doctorFeeValue !== undefined ? doctorFeeValue : operation.doctorFeeValue;
 
-      if (
-        !Number.isFinite(numericCost) ||
-        numericCost < 0
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Cost cannot be negative",
-        });
-      }
+    const financials = calculateOperationFinancials({
+      cost: nextCost,
+      discount: nextDiscount,
+      doctorFeeType: nextDoctorFeeType,
+      doctorFeeValue: nextDoctorFeeValue,
+    });
 
-      operation.cost = numericCost;
-    }
-
-    if (discount !== undefined) {
-      const numericDiscount =
-        Number(discount);
-
-      if (
-        !Number.isFinite(numericDiscount) ||
-        numericDiscount < 0
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Discount cannot be negative",
-        });
-      }
-
-      operation.discount =
-        numericDiscount;
-    }
-
-    if (
-      operation.discount >
-      operation.cost
-    ) {
+    if (financials.error) {
       return res.status(400).json({
         success: false,
-        message:
-          "Discount cannot be greater than cost",
-      });
-    }
-
-    if (doctorFeeType !== undefined) {
-      if (
-        ![
-          "none",
-          "fixed",
-          "percentage",
-        ].includes(doctorFeeType)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Invalid doctor fee type",
-        });
-      }
-
-      operation.doctorFeeType =
-        doctorFeeType;
-    }
-
-    if (doctorFeeValue !== undefined) {
-      const numericDoctorFeeValue =
-        Number(doctorFeeValue);
-
-      if (
-        !Number.isFinite(
-          numericDoctorFeeValue
-        ) ||
-        numericDoctorFeeValue < 0
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Doctor fee cannot be negative",
-        });
-      }
-
-      operation.doctorFeeValue =
-        numericDoctorFeeValue;
-    }
-
-    if (
-      operation.doctorFeeType ===
-        "percentage" &&
-      operation.doctorFeeValue > 100
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Doctor fee percentage cannot exceed 100",
-      });
-    }
-
-    const totalAmount =
-      operation.cost -
-      operation.discount;
-
-    let doctorFeeAmount = 0;
-
-    if (
-      operation.doctorFeeType ===
-      "fixed"
-    ) {
-      doctorFeeAmount =
-        operation.doctorFeeValue;
-    }
-
-    if (
-      operation.doctorFeeType ===
-      "percentage"
-    ) {
-      doctorFeeAmount =
-        (totalAmount *
-          operation.doctorFeeValue) /
-        100;
-    }
-
-    if (
-      doctorFeeAmount > totalAmount
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Doctor fee cannot be greater than operation amount",
+        message: req.t(`operations.${financials.error}`),
       });
     }
 
     if (
       paymentExists &&
-      totalAmount <
-        Number(operation.paidAmount || 0)
+      financials.totalAmount < Number(operation.paidAmount || 0)
     ) {
       return res.status(400).json({
         success: false,
-        message:
-          "Operation total cannot be less than the amount already paid",
-        paidAmount:
-          operation.paidAmount,
-        newTotalAmount:
-          totalAmount,
+        message: req.t("operations.totalLessThanPaid"),
+        paidAmount: operation.paidAmount,
+        newTotalAmount: financials.totalAmount,
       });
     }
 
-    operation.totalAmount =
-      totalAmount;
+    operation.cost = financials.cost;
+    operation.discount = financials.discount;
+    operation.totalAmount = financials.totalAmount;
+    operation.doctorFeeType = financials.doctorFeeType;
+    operation.doctorFeeValue = financials.doctorFeeValue;
+    operation.doctorFeeAmount = financials.doctorFeeAmount;
+    operation.hospitalAmount = financials.hospitalAmount;
 
-    operation.doctorFeeAmount =
-      doctorFeeAmount;
-
-    operation.hospitalAmount =
-      totalAmount -
-      doctorFeeAmount;
-
-    operation.remainingAmount =
+    operation.remainingAmount = roundAmount(
       Math.max(
-        totalAmount -
-          Number(
-            operation.paidAmount || 0
-          ),
+        financials.totalAmount - Number(operation.paidAmount || 0),
         0
-      );
+      )
+    );
 
-    if (
-      Number(operation.paidAmount || 0) ===
-      0
-    ) {
-      operation.paymentStatus =
-        "unpaid";
-    } else if (
-      Number(operation.paidAmount) >=
-      totalAmount
-    ) {
-      operation.paymentStatus =
-        "paid";
-
+    if (Number(operation.paidAmount || 0) === 0) {
+      operation.paymentStatus = "unpaid";
+    } else if (Number(operation.paidAmount) >= financials.totalAmount) {
+      operation.paymentStatus = "paid";
       operation.remainingAmount = 0;
     } else {
-      operation.paymentStatus =
-        "partial";
+      operation.paymentStatus = "partial";
     }
 
     if (status !== undefined) {
-      if (
-        ![
-          "pending",
-          "completed",
-          "cancelled",
-        ].includes(status)
-      ) {
+      if (!["pending", "completed", "cancelled"].includes(status)) {
         return res.status(400).json({
           success: false,
-          message:
-            "Invalid operation status",
+          message: req.t("operations.invalidStatus"),
         });
       }
 
@@ -806,8 +716,17 @@ const updateOperation = async (
       ) {
         return res.status(400).json({
           success: false,
-          message:
-            "Operation with payments cannot be cancelled",
+          message: req.t("operations.hasPaymentsCannotCancel"),
+        });
+      }
+
+      if (
+        operation.status === "completed" &&
+        status === "pending"
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("operations.completedCannotReturnPending"),
         });
       }
 
@@ -815,94 +734,86 @@ const updateOperation = async (
     }
 
     if (notes !== undefined) {
-      operation.notes = notes;
+      if (typeof notes !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: req.t("operations.invalidNotes"),
+        });
+      }
+
+      operation.notes = notes.trim();
     }
 
     await operation.save();
 
-    const populatedOperation =
-      await operationModels
-        .findById(operation._id)
-        .populate(
-          "patient",
-          "name phone"
-        )
-        .populate(
-          "doctor",
-          "name email"
-        )
-        .populate(
-          "specialty",
-          "name"
-        );
+    const populatedOperation = await getOperationPopulate(
+      operationModels.findById(operation._id)
+    );
 
     return res.status(200).json({
       success: true,
-      message:
-        "Operation updated successfully",
+      message: req.t("operations.updatedSuccessfully"),
       operation: populatedOperation,
     });
   } catch (error) {
-    console.error(
-      "UPDATE OPERATION ERROR:",
-      error
-    );
-
+    console.error("UPDATE OPERATION ERROR:", error);
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("operations.updateFailed"),
     });
   }
 };
 
-const cancelOperation = async (
-  req,
-  res
-) => {
+const cancelOperation = async (req, res) => {
   try {
-    const operation =
-      await operationModels.findById(
-        req.params.id
-      );
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("operations.invalidId"),
+      });
+    }
+
+    const operation = await operationModels.findById(id);
 
     if (!operation) {
       return res.status(404).json({
         success: false,
-        message: "Operation not found",
+        message: req.t("operations.notFound"),
       });
     }
 
-    if (
-      Number(operation.paidAmount || 0) > 0
-    ) {
+    if (operation.status === "cancelled") {
       return res.status(400).json({
         success: false,
-        message:
-          "Operation with payments cannot be cancelled directly",
+        message: req.t("operations.alreadyCancelled"),
+      });
+    }
+
+    if (Number(operation.paidAmount || 0) > 0) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("operations.hasPaymentsCannotCancel"),
       });
     }
 
     operation.status = "cancelled";
+    operation.remainingAmount = 0;
+    operation.paymentStatus = "unpaid";
 
     await operation.save();
 
     return res.status(200).json({
       success: true,
-      message:
-        "Operation cancelled successfully",
+      message: req.t("operations.cancelledSuccessfully"),
       operation,
     });
   } catch (error) {
-    console.error(
-      "CANCEL OPERATION ERROR:",
-      error
-    );
-
+    console.error("CANCEL OPERATION ERROR:", error);
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("operations.cancelFailed"),
     });
   }
 };
@@ -915,3 +826,4 @@ module.exports = {
   cancelOperation,
   completeOperation,
 };
+

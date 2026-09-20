@@ -1,73 +1,101 @@
-
+const mongoose = require("mongoose");
 const specialtyModels = require("../models/specialty.model");
 
-// Create Specialty
+const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
+
 const createSpecialty = async (req, res) => {
   try {
     const { name, description } = req.body;
 
-    if (!name?.trim()) {
+    if (typeof name !== "string" || !name.trim()) {
       return res.status(400).json({
         success: false,
-        message: "Specialty name is required",
+        message: req.t("specialties.nameRequired"),
+      });
+    }
+
+    if (
+      description !== undefined &&
+      description !== null &&
+      typeof description !== "string"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.invalidDescription"),
       });
     }
 
     const specialtyName = name.trim();
 
-    const existingSpecialty =
-      await specialtyModels.findOne({
-        name: specialtyName,
-      });
+    const existingSpecialty = await specialtyModels.findOne({
+      name: specialtyName,
+    });
 
     if (existingSpecialty) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
-        message: "Specialty already exists",
+        message: req.t("specialties.alreadyExists"),
       });
     }
 
-    const specialty =
-      await specialtyModels.create({
-        name: specialtyName,
-        description:
-          description?.trim() || null,
-      });
+    const specialty = await specialtyModels.create({
+      name: specialtyName,
+      description: description?.trim() || null,
+    });
 
     return res.status(201).json({
       success: true,
-      message: "Specialty created successfully",
+      message: req.t("specialties.createdSuccessfully"),
       specialty,
     });
   } catch (error) {
-    console.error(
-      "CREATE SPECIALTY ERROR:",
-      error
-    );
+    console.error("Create specialty error:", error);
 
-    if (error.code === 11000) {
-      return res.status(400).json({
+    if (error?.code === 11000) {
+      return res.status(409).json({
         success: false,
-        message: "Specialty already exists",
+        message: req.t("specialties.alreadyExists"),
       });
     }
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("common.serverError"),
     });
   }
 };
 
-// Get All Active Specialties
 const getAllSpecialties = async (req, res) => {
   try {
-    const {
-      search,
-      page = 1,
-      limit = 10,
-    } = req.query;
+    const { search, page = 1, limit = 10 } = req.query;
+
+    const pageNumber = Number(page);
+    const limitNumber = Number(limit);
+
+    if (!Number.isInteger(pageNumber) || pageNumber < 1) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.invalidPage"),
+      });
+    }
+
+    if (
+      !Number.isInteger(limitNumber) ||
+      limitNumber < 1 ||
+      limitNumber > 100
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.invalidLimit"),
+      });
+    }
+
+    if (search !== undefined && typeof search !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.invalidSearch"),
+      });
+    }
 
     const filter = {
       isActive: true,
@@ -80,30 +108,17 @@ const getAllSpecialties = async (req, res) => {
       };
     }
 
-    const pageNumber = Math.max(
-      Number(page) || 1,
-      1
-    );
+    const skip = (pageNumber - 1) * limitNumber;
 
-    const limitNumber = Math.min(
-      Math.max(Number(limit) || 10, 1),
-      100
-    );
-
-    const skip =
-      (pageNumber - 1) * limitNumber;
-
-    const total =
-      await specialtyModels.countDocuments(
-        filter
-      );
-
-    const specialties =
-      await specialtyModels
+    const [total, specialties] = await Promise.all([
+      specialtyModels.countDocuments(filter),
+      specialtyModels
         .find(filter)
         .sort({ name: 1 })
         .skip(skip)
-        .limit(limitNumber);
+        .limit(limitNumber)
+        .lean(),
+    ]);
 
     return res.status(200).json({
       success: true,
@@ -112,37 +127,36 @@ const getAllSpecialties = async (req, res) => {
         page: pageNumber,
         limit: limitNumber,
         total,
-        pages: Math.ceil(
-          total / limitNumber
-        ),
+        pages: Math.ceil(total / limitNumber),
       },
     });
   } catch (error) {
-    console.error(
-      "GET SPECIALTIES ERROR:",
-      error
-    );
+    console.error("Get specialties error:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("common.serverError"),
     });
   }
 };
 
-// Get Single Specialty
 const getSingleSpecialty = async (req, res) => {
   try {
-    const specialty =
-      await specialtyModels.findById(
-        req.params.id
-      );
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.invalidId"),
+      });
+    }
+
+    const specialty = await specialtyModels.findById(id);
 
     if (!specialty) {
       return res.status(404).json({
         success: false,
-        message: "Specialty not found",
+        message: req.t("specialties.notFound"),
       });
     }
 
@@ -151,61 +165,76 @@ const getSingleSpecialty = async (req, res) => {
       specialty,
     });
   } catch (error) {
-    console.error(
-      "GET SPECIALTY ERROR:",
-      error
-    );
+    console.error("Get specialty error:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("common.serverError"),
     });
   }
 };
 
-// Update Specialty
 const updateSpecialty = async (req, res) => {
   try {
-    const {
-      name,
-      description,
-      isActive,
-    } = req.body;
+    const { id } = req.params;
+    const { name, description, isActive } = req.body;
 
-    const specialty =
-      await specialtyModels.findById(
-        req.params.id
-      );
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.invalidId"),
+      });
+    }
+
+    if (name !== undefined && typeof name !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.invalidName"),
+      });
+    }
+
+    if (description !== undefined && description !== null && typeof description !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.invalidDescription"),
+      });
+    }
+
+    if (isActive !== undefined && typeof isActive !== "boolean") {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.invalidIsActive"),
+      });
+    }
+
+    const specialty = await specialtyModels.findById(id);
 
     if (!specialty) {
       return res.status(404).json({
         success: false,
-        message: "Specialty not found",
+        message: req.t("specialties.notFound"),
       });
     }
 
     if (name !== undefined) {
-      if (!name?.trim()) {
+      const specialtyName = name.trim();
+
+      if (!specialtyName) {
         return res.status(400).json({
           success: false,
-          message:
-            "Specialty name cannot be empty",
+          message: req.t("specialties.nameCannotBeEmpty"),
         });
       }
 
-      const specialtyName = name.trim();
-
-      const existingSpecialty =
-        await specialtyModels.findOne({
-          name: specialtyName,
-          _id: { $ne: specialty._id },
-        });
+      const existingSpecialty = await specialtyModels.findOne({
+        name: specialtyName,
+        _id: { $ne: id },
+      });
 
       if (existingSpecialty) {
-        return res.status(400).json({
+        return res.status(409).json({
           success: false,
-          message: "Specialty already exists",
+          message: req.t("specialties.alreadyExists"),
         });
       }
 
@@ -213,8 +242,7 @@ const updateSpecialty = async (req, res) => {
     }
 
     if (description !== undefined) {
-      specialty.description =
-        description?.trim() || null;
+      specialty.description = description?.trim() || null;
     }
 
     if (isActive !== undefined) {
@@ -225,65 +253,67 @@ const updateSpecialty = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Specialty updated successfully",
+      message: req.t("specialties.updatedSuccessfully"),
       specialty,
     });
   } catch (error) {
-    console.error(
-      "UPDATE SPECIALTY ERROR:",
-      error
-    );
+    console.error("Update specialty error:", error);
 
-    if (error.code === 11000) {
-      return res.status(400).json({
+    if (error?.code === 11000) {
+      return res.status(409).json({
         success: false,
-        message: "Specialty already exists",
+        message: req.t("specialties.alreadyExists"),
       });
     }
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("common.serverError"),
     });
   }
 };
 
-// Deactivate Specialty
 const deactivateSpecialty = async (req, res) => {
   try {
-    const specialty =
-      await specialtyModels.findById(
-        req.params.id
-      );
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.invalidId"),
+      });
+    }
+
+    const specialty = await specialtyModels.findById(id);
 
     if (!specialty) {
       return res.status(404).json({
         success: false,
-        message: "Specialty not found",
+        message: req.t("specialties.notFound"),
+      });
+    }
+
+    if (!specialty.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("specialties.alreadyInactive"),
       });
     }
 
     specialty.isActive = false;
-
     await specialty.save();
 
     return res.status(200).json({
       success: true,
-      message:
-        "Specialty deactivated successfully",
+      message: req.t("specialties.deactivatedSuccessfully"),
       specialty,
     });
   } catch (error) {
-    console.error(
-      "DEACTIVATE SPECIALTY ERROR:",
-      error
-    );
+    console.error("Deactivate specialty error:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("common.serverError"),
     });
   }
 };

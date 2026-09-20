@@ -1,144 +1,181 @@
-const mongoose = require("mongoose");
 
+const mongoose = require("mongoose");
 const Consultation = require("../models/consultation.model");
 const Visit = require("../models/visit.model");
 const Prescription = require("../models/prescription.models");
-
 const Medicine = require("../models/medicine.models");
 
-const createConsultation = async (req, res) => {
+const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 
+const normalizeText = (value) => {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return undefined;
+  return value.trim() || null;
+};
+
+const consultationPopulate = (query) =>
+  query
+    .populate("visit", "patient specialty doctor visitType consultationFee paymentStatus status completedAt")
+    .populate("patient", "name phone email nationalId dateOfBirth gender address")
+    .populate("doctor", "name phone email");
+
+const validateConsultationText = (value) => {
+  if (value === undefined) return true;
+  return typeof value === "string";
+};
+
+const validatePrescriptionItems = (items, req) => {
+  if (!Array.isArray(items)) {
+    return req.t("consultations.itemsMustBeArray");
+  }
+
+  for (const item of items) {
+    if (!item || !item.medicine || item.quantity === undefined || !item.dosage || !item.frequency || !item.duration) {
+      return req.t("consultations.invalidPrescriptionItem");
+    }
+
+    if (!isValidId(item.medicine)) {
+      return req.t("consultations.invalidMedicineId");
+    }
+
+    const quantity = Number(item.quantity);
+
+    if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isInteger(quantity)) {
+      return req.t("consultations.invalidMedicineQuantity");
+    }
+
+    if (
+      typeof item.dosage !== "string" ||
+      typeof item.frequency !== "string" ||
+      typeof item.duration !== "string"
+    ) {
+      return req.t("consultations.invalidPrescriptionItem");
+    }
+
+    if (item.instructions !== undefined && typeof item.instructions !== "string") {
+      return req.t("consultations.invalidPrescriptionInstructions");
+    }
+
+    if (!item.dosage.trim() || !item.frequency.trim() || !item.duration.trim()) {
+      return req.t("consultations.invalidPrescriptionItem");
+    }
+  }
+
+  return null;
+};
+
+const createConsultation = async (req, res) => {
   try {
-    const {visit,symptoms,diagnosis, notes,} = req.body;
+    const { visit, symptoms, diagnosis, notes } = req.body;
 
     if (!visit) {
       return res.status(400).json({
         success: false,
-        message: "Visit is required",
+        message: req.t("consultations.visitRequired"),
       });
     }
 
-    const existingVisit =
-      await Visit.findById(visit);
+    if (!isValidId(visit)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("consultations.invalidVisitId"),
+      });
+    }
+
+    if (!validateConsultationText(symptoms) || !validateConsultationText(diagnosis) || !validateConsultationText(notes)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("consultations.textFieldsMustBeString"),
+      });
+    }
+
+    const existingVisit = await Visit.findById(visit);
 
     if (!existingVisit) {
       return res.status(404).json({
         success: false,
-        message: "Visit not found",
+        message: req.t("consultations.visitNotFound"),
       });
     }
 
     if (existingVisit.status === "cancelled") {
       return res.status(400).json({
         success: false,
-        message:
-          "Cannot create consultation for a cancelled visit",
+        message: req.t("consultations.cancelledVisit"),
       });
     }
 
     if (existingVisit.status !== "in_consultation") {
       return res.status(400).json({
         success: false,
-        message:
-          "Visit must be in consultation status",
+        message: req.t("consultations.visitMustBeInConsultation"),
       });
     }
 
     if (!existingVisit.doctor) {
       return res.status(400).json({
         success: false,
-        message:
-          "Visit must have an assigned doctor",
+        message: req.t("consultations.visitDoctorRequired"),
       });
     }
 
-    const existingConsultation =
-      await Consultation.findOne({ visit });
+    const existingConsultation = await Consultation.findOne({ visit });
 
     if (existingConsultation) {
       return res.status(409).json({
         success: false,
-        message:
-          "Consultation already exists for this visit",
+        message: req.t("consultations.alreadyExists"),
         consultation: existingConsultation,
       });
     }
 
-    const consultation =
-      await Consultation.create({
-        visit: existingVisit._id,
-        patient: existingVisit.patient,
-        doctor: existingVisit.doctor,
-        symptoms: symptoms?.trim() || null,
-        diagnosis: diagnosis?.trim() || null,
-        notes: notes?.trim() || null,
-      });
+    const consultation = await Consultation.create({
+      visit: existingVisit._id,
+      patient: existingVisit.patient,
+      doctor: existingVisit.doctor,
+      symptoms: normalizeText(symptoms),
+      diagnosis: normalizeText(diagnosis),
+      notes: normalizeText(notes),
+    });
 
-    const createdConsultation =
-      await Consultation.findById(
-        consultation._id
-      )
-        .populate(
-          "visit",
-          "patient specialty doctor visitType consultationFee paymentStatus status"
-        )
-        .populate(
-          "patient",
-          "name phone email nationalId dateOfBirth gender address"
-        )
-        .populate(
-          "doctor",
-          "name phone email"
-        );
+    const createdConsultation = await consultationPopulate(
+      Consultation.findById(consultation._id)
+    );
 
     return res.status(201).json({
       success: true,
-      message:
-        "Consultation created successfully",
+      message: req.t("consultations.createdSuccessfully"),
       consultation: createdConsultation,
     });
   } catch (error) {
-    console.error(
-      "Create consultation error:",
-      error
-    );
+    console.error("CREATE CONSULTATION ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("consultations.createFailed"),
     });
   }
 };
 
-const getConsultationByVisit = async (
-  req,
-  res
-) => {
+const getConsultationByVisit = async (req, res) => {
   try {
     const { visitId } = req.params;
 
-    const consultation =
-      await Consultation.findOne({
-        visit: visitId,
-      })
-        .populate(
-          "visit",
-          "patient specialty doctor visitType consultationFee paymentStatus status"
-        )
-        .populate(
-          "patient",
-          "name phone email nationalId dateOfBirth gender address"
-        )
-        .populate(
-          "doctor",
-          "name phone email"
-        );
+    if (!isValidId(visitId)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("consultations.invalidVisitId"),
+      });
+    }
+
+    const consultation = await consultationPopulate(
+      Consultation.findOne({ visit: visitId })
+    );
 
     if (!consultation) {
       return res.status(404).json({
         success: false,
-        message: "Consultation not found",
+        message: req.t("consultations.notFound"),
       });
     }
 
@@ -147,135 +184,103 @@ const getConsultationByVisit = async (
       consultation,
     });
   } catch (error) {
-    console.error(
-      "Get consultation by visit error:",
-      error
-    );
+    console.error("GET CONSULTATION BY VISIT ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("consultations.fetchFailed"),
     });
   }
 };
 
-const updateConsultation = async (
-  req,
-  res
-) => {
+const updateConsultation = async (req, res) => {
   try {
     const { id } = req.params;
+    const { symptoms, diagnosis, notes } = req.body;
 
-    const {
-      symptoms,
-      diagnosis,
-      notes,
-    } = req.body;
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("consultations.invalidId"),
+      });
+    }
 
-    const consultation =
-      await Consultation.findById(id);
+    if (!validateConsultationText(symptoms) || !validateConsultationText(diagnosis) || !validateConsultationText(notes)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("consultations.textFieldsMustBeString"),
+      });
+    }
+
+    const consultation = await Consultation.findById(id);
 
     if (!consultation) {
       return res.status(404).json({
         success: false,
-        message: "Consultation not found",
+        message: req.t("consultations.notFound"),
       });
     }
 
-    const visit =
-      await Visit.findById(
-        consultation.visit
-      );
+    const visit = await Visit.findById(consultation.visit);
 
     if (!visit) {
       return res.status(404).json({
         success: false,
-        message: "Visit not found",
+        message: req.t("consultations.visitNotFound"),
       });
     }
 
     if (visit.status === "cancelled") {
       return res.status(400).json({
         success: false,
-        message:
-          "Cancelled visit cannot be updated",
+        message: req.t("consultations.cancelledVisitCannotUpdate"),
       });
     }
 
     if (visit.status === "completed") {
       return res.status(400).json({
         success: false,
-        message:
-          "Completed consultation cannot be updated",
+        message: req.t("consultations.completedCannotUpdate"),
       });
     }
 
     if (symptoms !== undefined) {
-      consultation.symptoms =
-        symptoms?.trim() || null;
+      consultation.symptoms = normalizeText(symptoms);
     }
 
     if (diagnosis !== undefined) {
-      consultation.diagnosis =
-        diagnosis?.trim() || null;
+      consultation.diagnosis = normalizeText(diagnosis);
     }
 
     if (notes !== undefined) {
-      consultation.notes =
-        notes?.trim() || null;
+      consultation.notes = normalizeText(notes);
     }
 
     await consultation.save();
 
-    const updatedConsultation =
-      await Consultation.findById(
-        consultation._id
-      )
-        .populate(
-          "visit",
-          "patient specialty doctor visitType consultationFee paymentStatus status"
-        )
-        .populate(
-          "patient",
-          "name phone email nationalId dateOfBirth gender address"
-        )
-        .populate(
-          "doctor",
-          "name phone email"
-        );
+    const updatedConsultation = await consultationPopulate(
+      Consultation.findById(consultation._id)
+    );
 
     return res.status(200).json({
       success: true,
-      message:
-        "Consultation updated successfully",
-      consultation:
-        updatedConsultation,
+      message: req.t("consultations.updatedSuccessfully"),
+      consultation: updatedConsultation,
     });
   } catch (error) {
-    console.error(
-      "Update consultation error:",
-      error
-    );
+    console.error("UPDATE CONSULTATION ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("consultations.updateFailed"),
     });
   }
 };
 
-const completeConsultation = async (
-  req,
-  res
-) => {
-  const session =
-    await mongoose.startSession();
+const completeConsultation = async (req, res) => {
+  const session = await mongoose.startSession();
 
   try {
-    session.startTransaction();
-
     const {
       visit: visitId,
       symptoms,
@@ -286,266 +291,184 @@ const completeConsultation = async (
     } = req.body;
 
     if (!visitId) {
-      throw new Error(
-        "Visit is required"
-      );
+      return res.status(400).json({
+        success: false,
+        message: req.t("consultations.visitRequired"),
+      });
     }
 
-    if (!Array.isArray(items)) {
-      throw new Error(
-        "Prescription items must be an array"
-      );
-    }
-
-    const visit =
-      await Visit.findById(
-        visitId
-      ).session(session);
-
-    if (!visit) {
-      throw new Error(
-        "Visit not found"
-      );
-    }
-
-    if (visit.status === "cancelled") {
-      throw new Error(
-        "Cancelled visit cannot be completed"
-      );
-    }
-
-    if (visit.status === "completed") {
-      throw new Error(
-        "Visit is already completed"
-      );
+    if (!isValidId(visitId)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("consultations.invalidVisitId"),
+      });
     }
 
     if (
-      visit.status !==
-      "in_consultation"
+      !validateConsultationText(symptoms) ||
+      !validateConsultationText(diagnosis) ||
+      !validateConsultationText(notes) ||
+      !validateConsultationText(prescriptionNotes)
     ) {
-      throw new Error(
-        "Visit must be in consultation status"
-      );
+      return res.status(400).json({
+        success: false,
+        message: req.t("consultations.textFieldsMustBeString"),
+      });
     }
 
-    if (!visit.doctor) {
-      throw new Error(
-        "Visit must have an assigned doctor"
-      );
+    const itemsError = validatePrescriptionItems(items, req);
+
+    if (itemsError) {
+      return res.status(400).json({
+        success: false,
+        message: itemsError,
+      });
     }
 
-    let consultation =
-      await Consultation.findOne({
+    await session.withTransaction(async () => {
+      const visit = await Visit.findById(visitId).session(session);
+
+      if (!visit) {
+        throw new Error("VISIT_NOT_FOUND");
+      }
+
+      if (visit.status === "cancelled") {
+        throw new Error("CANCELLED_VISIT");
+      }
+
+      if (visit.status === "completed") {
+        throw new Error("VISIT_ALREADY_COMPLETED");
+      }
+
+      if (visit.status !== "in_consultation") {
+        throw new Error("VISIT_NOT_IN_CONSULTATION");
+      }
+
+      if (!visit.doctor) {
+        throw new Error("VISIT_DOCTOR_REQUIRED");
+      }
+
+      let consultation = await Consultation.findOne({
         visit: visit._id,
       }).session(session);
 
-    if (!consultation) {
-      consultation =
-        new Consultation({
+      if (!consultation) {
+        consultation = new Consultation({
           visit: visit._id,
           patient: visit.patient,
           doctor: visit.doctor,
         });
-    } else {
-      if (
-        consultation.patient?.toString() !==
-        visit.patient?.toString()
-      ) {
-        throw new Error(
-          "Consultation patient does not match visit patient"
+      } else {
+        if (consultation.patient?.toString() !== visit.patient?.toString()) {
+          throw new Error("CONSULTATION_PATIENT_MISMATCH");
+        }
+
+        if (consultation.doctor?.toString() !== visit.doctor?.toString()) {
+          throw new Error("CONSULTATION_DOCTOR_MISMATCH");
+        }
+      }
+
+      consultation.symptoms = normalizeText(symptoms);
+      consultation.diagnosis = normalizeText(diagnosis);
+      consultation.notes = normalizeText(notes);
+
+      await consultation.save({ session });
+
+      let prescription = null;
+
+      if (items.length > 0) {
+        const medicineIds = items.map((item) => item.medicine);
+
+        const medicines = await Medicine.find({
+          _id: { $in: medicineIds },
+        })
+          .select("_id")
+          .session(session);
+
+        const medicineIdsSet = new Set(
+          medicines.map((medicine) => medicine._id.toString())
         );
-      }
 
-      if (
-        consultation.doctor?.toString() !==
-        visit.doctor?.toString()
-      ) {
-        throw new Error(
-          "Consultation doctor does not match visit doctor"
-        );
-      }
-    }
-
-    consultation.symptoms =
-      symptoms?.trim() || null;
-
-    consultation.diagnosis =
-      diagnosis?.trim() || null;
-
-    consultation.notes =
-      notes?.trim() || null;
-
-    await consultation.save({
-      session,
-    });
-
-    let prescription = null;
-
-    if (items.length > 0) {
-      for (const item of items) {
-        if (
-          !item.medicine ||
-          !item.quantity ||
-          !item.dosage ||
-          !item.frequency ||
-          !item.duration
-        ) {
-          throw new Error(
-            "Each prescription item must contain medicine, quantity, dosage, frequency and duration"
-          );
+        for (const medicineId of medicineIds) {
+          if (!medicineIdsSet.has(medicineId.toString())) {
+            throw new Error("MEDICINE_NOT_FOUND");
+          }
         }
 
-        if (
-          Number(item.quantity) <= 0
-        ) {
-          throw new Error(
-            "Medicine quantity must be greater than zero"
-          );
-        }
-
-        const medicine =
-          await Medicine.findById(
-            item.medicine
-          ).session(session);
-
-        if (!medicine) {
-          throw new Error(
-            `Medicine not found: ${item.medicine}`
-          );
-        }
-      }
-
-      prescription =
-        await Prescription.findOne({
-          consultation:
-            consultation._id,
+        prescription = await Prescription.findOne({
+          consultation: consultation._id,
         }).session(session);
 
-      if (prescription) {
-        if (
-          prescription.status ===
-          "Cancelled"
-        ) {
-          throw new Error(
-            "Cancelled prescription cannot be updated"
-          );
-        }
+        if (prescription) {
+          if (prescription.status === "Cancelled") {
+            throw new Error("CANCELLED_PRESCRIPTION");
+          }
 
-        if (
-          prescription.status ===
-          "Dispensed"
-        ) {
-          throw new Error(
-            "Dispensed prescription cannot be updated"
-          );
-        }
+          if (prescription.status === "Dispensed") {
+            throw new Error("DISPENSED_PRESCRIPTION");
+          }
 
-        prescription.items =
-          items.map((item) => ({
+          prescription.items = items.map((item) => ({
             medicine: item.medicine,
-            quantity: Number(
-              item.quantity
-            ),
-            dosage:
-              item.dosage.trim(),
-            frequency:
-              item.frequency.trim(),
-            duration:
-              item.duration.trim(),
-            instructions:
-              item.instructions
-                ?.trim() || null,
+            quantity: Number(item.quantity),
+            dosage: item.dosage.trim(),
+            frequency: item.frequency.trim(),
+            duration: item.duration.trim(),
+            instructions: item.instructions?.trim() || null,
           }));
 
-        prescription.notes =
-          prescriptionNotes?.trim() ||
-          null;
+          prescription.notes = normalizeText(prescriptionNotes);
 
-        await prescription.save({
-          session,
-        });
-      } else {
-        prescription =
-          new Prescription({
-            consultation:
-              consultation._id,
+          await prescription.save({ session });
+        } else {
+          prescription = new Prescription({
+            consultation: consultation._id,
             patient: visit.patient,
-            items: items.map(
-              (item) => ({
-                medicine:
-                  item.medicine,
-                quantity: Number(
-                  item.quantity
-                ),
-                dosage:
-                  item.dosage.trim(),
-                frequency:
-                  item.frequency.trim(),
-                duration:
-                  item.duration.trim(),
-                instructions:
-                  item.instructions
-                    ?.trim() || null,
-              })
-            ),
-            notes:
-              prescriptionNotes
-                ?.trim() || null,
+            items: items.map((item) => ({
+              medicine: item.medicine,
+              quantity: Number(item.quantity),
+              dosage: item.dosage.trim(),
+              frequency: item.frequency.trim(),
+              duration: item.duration.trim(),
+              instructions: item.instructions?.trim() || null,
+            })),
+            notes: normalizeText(prescriptionNotes),
             status: "Pending",
-            createdBy:
-              req.user._id,
+            createdBy: req.user._id,
           });
 
-        await prescription.save({
-          session,
-        });
+          await prescription.save({ session });
+        }
       }
-    }
 
-    visit.status = "completed";
-    visit.completedAt =
-      new Date();
+      visit.status = "completed";
+      visit.completedAt = new Date();
 
-    await visit.save({
-      session,
+      await visit.save({ session });
+
+      return { consultation, prescription, visit };
     });
 
-    await session.commitTransaction();
+    const consultation = await Consultation.findOne({ visit: visitId });
 
-    const completedConsultation =
-      await Consultation.findById(
-        consultation._id
-      )
-        .populate(
-          "patient",
-          "name phone email nationalId dateOfBirth gender address"
-        )
-        .populate(
-          "doctor",
-          "name phone email"
-        )
-        .populate(
-          "visit",
-          "patient specialty doctor visitType consultationFee paymentStatus status completedAt"
-        );
+    const completedConsultation = await consultationPopulate(
+      Consultation.findById(consultation._id)
+    );
 
-    let populatedPrescription =
-      null;
+    let populatedPrescription = null;
 
-    if (prescription) {
-      populatedPrescription =
-        await Prescription.findById(
-          prescription._id
-        )
+    if (consultation) {
+      const prescription = await Prescription.findOne({
+        consultation: consultation._id,
+      });
+
+      if (prescription) {
+        populatedPrescription = await Prescription.findById(prescription._id)
           .populate(
             "patient",
             "name phone email nationalId dateOfBirth gender address"
           )
-          .populate(
-            "createdBy",
-            "name email role"
-          )
+          .populate("createdBy", "name email role")
           .populate(
             "consultation",
             "visit patient doctor symptoms diagnosis notes createdAt updatedAt"
@@ -554,41 +477,44 @@ const completeConsultation = async (
             "items.medicine",
             "name genericName manufacturer"
           );
+      }
     }
+
+    const completedVisit = await Visit.findById(visitId).select(
+      "_id status paymentStatus completedAt"
+    );
 
     return res.status(200).json({
       success: true,
-      message:
-        populatedPrescription
-          ? "Consultation and prescription completed successfully"
-          : "Consultation completed successfully",
-      visit: {
-        _id: visit._id,
-        status: visit.status,
-        paymentStatus:
-          visit.paymentStatus,
-        completedAt:
-          visit.completedAt,
-      },
-      consultation:
-        completedConsultation,
-      prescription:
-        populatedPrescription,
+      message: populatedPrescription
+        ? req.t("consultations.completedWithPrescription")
+        : req.t("consultations.completedSuccessfully"),
+      visit: completedVisit,
+      consultation: completedConsultation,
+      prescription: populatedPrescription,
     });
   } catch (error) {
-    await session.abortTransaction();
+    console.error("COMPLETE CONSULTATION ERROR:", error);
 
-    console.error(
-      "Complete consultation error:",
-      error
-    );
+    const errorMessages = {
+      VISIT_NOT_FOUND: "consultations.visitNotFound",
+      CANCELLED_VISIT: "consultations.cancelledVisit",
+      VISIT_ALREADY_COMPLETED: "consultations.visitAlreadyCompleted",
+      VISIT_NOT_IN_CONSULTATION: "consultations.visitMustBeInConsultation",
+      VISIT_DOCTOR_REQUIRED: "consultations.visitDoctorRequired",
+      CONSULTATION_PATIENT_MISMATCH: "consultations.patientMismatch",
+      CONSULTATION_DOCTOR_MISMATCH: "consultations.doctorMismatch",
+      MEDICINE_NOT_FOUND: "consultations.medicineNotFound",
+      CANCELLED_PRESCRIPTION: "consultations.cancelledPrescription",
+      DISPENSED_PRESCRIPTION: "consultations.dispensedPrescription",
+    };
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: req.t(errorMessages[error.message] || "consultations.completeFailed"),
     });
   } finally {
-    session.endSession();
+    await session.endSession();
   }
 };
 
@@ -598,3 +524,4 @@ module.exports = {
   updateConsultation,
   completeConsultation,
 };
+

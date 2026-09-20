@@ -1,15 +1,35 @@
 const express = require("express");
 
-const { createOperationPayment, getOperationPayments, getSinglePayment,
+const {
+  createOperationPayment,
+  getOperationPayments,
+  getSinglePayment,
 } = require("../controllers/paymentController");
+
 const protect = require("../middlewares/authMiddleware");
+const authorize = require("../middlewares/roleMiddleware");
+
 const operationPaymentRouter = express.Router();
 
-operationPaymentRouter.post( "/", protect, createOperationPayment
+operationPaymentRouter.post(
+  "/",
+  protect,
+  authorize("admin", "receptionist"),
+  createOperationPayment
 );
-operationPaymentRouter.get( "/operation/:operationId", protect, getOperationPayments
+
+operationPaymentRouter.get(
+  "/operation/:operationId",
+  protect,
+  authorize("admin", "doctor", "receptionist"),
+  getOperationPayments
 );
-operationPaymentRouter.get( "/:id", protect, getSinglePayment
+
+operationPaymentRouter.get(
+  "/:id",
+  protect,
+  authorize("admin", "doctor", "receptionist"),
+  getSinglePayment
 );
 
 module.exports = operationPaymentRouter;

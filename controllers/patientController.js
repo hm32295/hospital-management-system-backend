@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 
 const patientModels = require("../models/patient.models");
 const visitModels = require("../models/visit.model");
@@ -6,13 +7,50 @@ const saleModels = require("../models/sale.models");
 const operationModels = require("../models/operation.model");
 const paymentModels = require("../models/payment.models");
 
-const getAllPatient = async (req, res) => {
-  try {
-    const { search, page = 1, limit = 10 } = req.query;
+const allowedGenders = [
+  "male",
+  "female",
+];
 
-    const filter = {
-      isActive: true,
-    };
+const isValidEmail = (email) => {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+    email
+  );
+};
+
+// Get All Patients
+const getAllPatient = async (
+  req,
+  res
+) => {
+  try {
+    const {
+      search,
+      isActive,
+      page = 1,
+      limit = 10,
+    } = req.query;
+
+    const filter = {};
+
+    if (isActive !== undefined) {
+      if (
+        isActive !== "true" &&
+        isActive !== "false"
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: req.t(
+            "patients.invalidIsActive"
+          ),
+        });
+      }
+
+      filter.isActive =
+        isActive === "true";
+    } else {
+      filter.isActive = true;
+    }
 
     if (search?.trim()) {
       const searchValue = search.trim();
@@ -87,12 +125,6 @@ const getAllPatient = async (req, res) => {
         (patient) => patient._id
       );
 
-    /*
-      =========================
-      GET PATIENT TRANSACTIONS
-      =========================
-    */
-
     const [
       visits,
       operations,
@@ -132,12 +164,6 @@ const getAllPatient = async (req, res) => {
         .lean(),
     ]);
 
-    /*
-      =========================
-      VALID TRANSACTIONS
-      =========================
-    */
-
     const validVisits =
       visits.filter(
         (visit) =>
@@ -156,12 +182,6 @@ const getAllPatient = async (req, res) => {
           sale.status !== "cancelled"
       );
 
-    /*
-      =========================
-      TRANSACTION IDS
-      =========================
-    */
-
     const visitIds =
       validVisits.map(
         (visit) => visit._id
@@ -176,17 +196,6 @@ const getAllPatient = async (req, res) => {
       validSales.map(
         (sale) => sale._id
       );
-
-    /*
-      =========================
-      GET PAYMENTS
-      =========================
-
-      We check both patient and
-      transaction references because
-      some old payments may have
-      patient = null.
-    */
 
     const paymentConditions = [
       {
@@ -231,12 +240,6 @@ const getAllPatient = async (req, res) => {
         )
         .lean();
 
-    /*
-      =========================
-      CREATE ACCOUNT MAP
-      =========================
-    */
-
     const accounts = new Map();
 
     patientIds.forEach(
@@ -251,12 +254,6 @@ const getAllPatient = async (req, res) => {
         );
       }
     );
-
-    /*
-      =========================
-      ADD VISIT CHARGES
-      =========================
-    */
 
     validVisits.forEach(
       (visit) => {
@@ -273,12 +270,6 @@ const getAllPatient = async (req, res) => {
       }
     );
 
-    /*
-      =========================
-      ADD OPERATION CHARGES
-      =========================
-    */
-
     validOperations.forEach(
       (operation) => {
         const account =
@@ -294,12 +285,6 @@ const getAllPatient = async (req, res) => {
       }
     );
 
-    /*
-      =========================
-      ADD SALES CHARGES
-      =========================
-    */
-
     validSales.forEach(
       (sale) => {
         const account =
@@ -314,16 +299,6 @@ const getAllPatient = async (req, res) => {
         );
       }
     );
-
-    /*
-      =========================
-      MAP TRANSACTION -> PATIENT
-      =========================
-
-      This makes finding the patient
-      much faster than using .find()
-      for every payment.
-    */
 
     const visitPatientMap =
       new Map();
@@ -360,12 +335,6 @@ const getAllPatient = async (req, res) => {
         );
       }
     );
-
-    /*
-      =========================
-      ADD PAYMENTS
-      =========================
-    */
 
     payments.forEach(
       (payment) => {
@@ -417,12 +386,6 @@ const getAllPatient = async (req, res) => {
       }
     );
 
-    /*
-      =========================
-      CALCULATE DUE
-      =========================
-    */
-
     accounts.forEach(
       (account) => {
         account.due = Math.max(
@@ -432,12 +395,6 @@ const getAllPatient = async (req, res) => {
         );
       }
     );
-
-    /*
-      =========================
-      ATTACH ACCOUNT
-      =========================
-    */
 
     const patientsWithAccounts =
       patients.map(
@@ -469,31 +426,48 @@ const getAllPatient = async (req, res) => {
     });
   } catch (error) {
     console.error(
-      "Get patients error:",
+      "Get Patients Error:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to get patients",
-      error: error.message,
+      message: req.t(
+        "common.serverError"
+      ),
     });
   }
 };
 
-const getSinglePatient = async (req, res) => {
+// Get Single Patient
+const getSinglePatient = async (
+  req,
+  res
+) => {
   try {
+    const { id } = req.params;
+
+    if (
+      !mongoose.Types.ObjectId.isValid(id)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("common.invalidId"),
+      });
+    }
+
     const patient =
       await patientModels.findOne({
-        _id: req.params.id,
+        _id: id,
         isActive: true,
       });
 
     if (!patient) {
       return res.status(404).json({
         success: false,
-        message: "Patient not found",
+        message: req.t(
+          "patients.notFound"
+        ),
       });
     }
 
@@ -503,29 +477,46 @@ const getSinglePatient = async (req, res) => {
     });
   } catch (error) {
     console.error(
-      "Get single patient error:",
+      "Get Single Patient Error:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to get patient",
-      error: error.message,
+      message: req.t(
+        "common.serverError"
+      ),
     });
   }
 };
-const getPatientDetails = async (req, res) => {
+
+// Get Patient Details
+
+const getPatientDetails = async ( req,res) => {
   try {
     const { id } = req.params;
-    const patient = await patientModels.findOne({
-      _id: id,
-      isActive: true,
-    });
+
+    if (
+      !mongoose.Types.ObjectId.isValid(id)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("common.invalidId"),
+      });
+    }
+
+    const patient =
+      await patientModels.findOne({
+        _id: id,
+        isActive: true,
+      });
 
     if (!patient) {
       return res.status(404).json({
         success: false,
-        message: "Patient not found",
+        message: req.t(
+          "patients.notFound"
+        ),
       });
     }
 
@@ -539,8 +530,14 @@ const getPatientDetails = async (req, res) => {
         .find({
           patient: id,
         })
-        .populate("specialty", "name")
-        .populate("doctor", "name phone")
+        .populate(
+          "specialty",
+          "name"
+        )
+        .populate(
+          "doctor",
+          "name phone"
+        )
         .sort({
           createdAt: -1,
         }),
@@ -610,10 +607,11 @@ const getPatientDetails = async (req, res) => {
         }),
     ]);
 
-    const validVisits = visits.filter(
-      (visit) =>
-        visit.status !== "cancelled"
-    );
+    const validVisits =
+      visits.filter(
+        (visit) =>
+          visit.status !== "cancelled"
+      );
 
     const validOperations =
       operations.filter(
@@ -621,58 +619,61 @@ const getPatientDetails = async (req, res) => {
           operation.status !== "cancelled"
       );
 
-    const validSales = sales.filter(
-      (sale) =>
-        sale.status !== "cancelled"
-    );
+    const validSales =
+      sales.filter(
+        (sale) =>
+          sale.status !== "cancelled"
+      );
 
-    const visitIds = validVisits.map(
-      (visit) => visit._id
-    );
+    const visitIds =
+      validVisits.map(
+        (visit) => visit._id
+      );
 
     const operationIds =
       validOperations.map(
         (operation) => operation._id
       );
 
-    const saleIds = validSales.map(
-      (sale) => sale._id
-    );
+    const saleIds =
+      validSales.map(
+        (sale) => sale._id
+      );
 
-    /*
-      Get all payments belonging to this patient.
+    const paymentOrConditions = [
+      {
+        patient: id,
+      },
+    ];
 
-      We don't depend only on payment.patient
-      because old payments may have the patient
-      missing while still being linked to a
-      visit, operation, or sale.
-    */
+    if (visitIds.length) {
+      paymentOrConditions.push({
+        visit: {
+          $in: visitIds,
+        },
+      });
+    }
+
+    if (operationIds.length) {
+      paymentOrConditions.push({
+        operation: {
+          $in: operationIds,
+        },
+      });
+    }
+
+    if (saleIds.length) {
+      paymentOrConditions.push({
+        sale: {
+          $in: saleIds,
+        },
+      });
+    }
+
     const payments =
       await paymentModels
         .find({
-          $or: [
-            {
-              patient: id,
-            },
-
-            {
-              visit: {
-                $in: visitIds,
-              },
-            },
-
-            {
-              operation: {
-                $in: operationIds,
-              },
-            },
-
-            {
-              sale: {
-                $in: saleIds,
-              },
-            },
-          ],
+          $or: paymentOrConditions,
         })
         .populate(
           "sale",
@@ -704,12 +705,6 @@ const getPatientDetails = async (req, res) => {
           payment.status === "completed"
       );
 
-    /*
-      =========================
-      CHARGES
-      =========================
-    */
-
     const visitCharges =
       validVisits.reduce(
         (total, visit) =>
@@ -740,12 +735,6 @@ const getPatientDetails = async (req, res) => {
         0
       );
 
-    /*
-      =========================
-      DISCOUNTS
-      =========================
-    */
-
     const visitDiscounts = 0;
 
     const operationDiscounts =
@@ -773,12 +762,6 @@ const getPatientDetails = async (req, res) => {
       operationDiscounts +
       salesDiscounts;
 
-    /*
-      =========================
-      PAYMENTS BY SOURCE
-      =========================
-    */
-
     const visitPaid =
       completedPayments
         .filter(
@@ -798,7 +781,8 @@ const getPatientDetails = async (req, res) => {
       completedPayments
         .filter(
           (payment) =>
-            payment.type === "operation"
+            payment.type ===
+            "operation"
         )
         .reduce(
           (total, payment) =>
@@ -829,12 +813,6 @@ const getPatientDetails = async (req, res) => {
       operationPaid +
       salesPaid;
 
-    /*
-      =========================
-      TOTAL ACCOUNT
-      =========================
-    */
-
     const totalCharges =
       visitCharges +
       operationCharges +
@@ -845,12 +823,6 @@ const getPatientDetails = async (req, res) => {
         totalCharges - totalPaid,
         0
       );
-
-    /*
-      =========================
-      REMAINING BY SOURCE
-      =========================
-    */
 
     const visitRemaining =
       Math.max(
@@ -871,24 +843,19 @@ const getPatientDetails = async (req, res) => {
         0
       );
 
-    /*
-      =========================
-      ADD REAL PAYMENT DATA
-      TO EACH VISIT
-      =========================
-    */
-
     const visitsWithAccount =
       validVisits.map((visit) => {
         const paid =
           completedPayments
             .filter(
               (payment) =>
-                payment.type === "visit" &&
+                payment.type ===
+                  "visit" &&
                 String(
                   payment.visit?._id ||
                     payment.visit
-                ) === String(visit._id)
+                ) ===
+                  String(visit._id)
             )
             .reduce(
               (total, payment) =>
@@ -910,7 +877,8 @@ const getPatientDetails = async (req, res) => {
         return {
           ...visit.toObject(),
           paidAmount: paid,
-          remainingAmount: remaining,
+          remainingAmount:
+            remaining,
           paymentStatus:
             remaining <= 0
               ? "paid"
@@ -919,13 +887,6 @@ const getPatientDetails = async (req, res) => {
               : "pending",
         };
       });
-
-    /*
-      =========================
-      ADD REAL PAYMENT DATA
-      TO EACH OPERATION
-      =========================
-    */
 
     const operationsWithAccount =
       validOperations.map(
@@ -940,7 +901,9 @@ const getPatientDetails = async (req, res) => {
                     payment.operation?._id ||
                       payment.operation
                   ) ===
-                    String(operation._id)
+                    String(
+                      operation._id
+                    )
               )
               .reduce(
                 (total, payment) =>
@@ -954,7 +917,8 @@ const getPatientDetails = async (req, res) => {
           const remaining =
             Math.max(
               Number(
-                operation.totalAmount || 0
+                operation.totalAmount ||
+                  0
               ) - paid,
               0
             );
@@ -962,7 +926,8 @@ const getPatientDetails = async (req, res) => {
           return {
             ...operation.toObject(),
             paidAmount: paid,
-            remainingAmount: remaining,
+            remainingAmount:
+              remaining,
             paymentStatus:
               remaining <= 0
                 ? "paid"
@@ -972,13 +937,6 @@ const getPatientDetails = async (req, res) => {
           };
         }
       );
-
-    /*
-      =========================
-      ADD REAL PAYMENT DATA
-      TO EACH SALE
-      =========================
-    */
 
     const salesWithAccount =
       validSales.map((sale) => {
@@ -990,7 +948,8 @@ const getPatientDetails = async (req, res) => {
                 String(
                   payment.sale?._id ||
                     payment.sale
-                ) === String(sale._id)
+                ) ===
+                  String(sale._id)
             )
             .reduce(
               (total, payment) =>
@@ -1012,7 +971,8 @@ const getPatientDetails = async (req, res) => {
         return {
           ...sale.toObject(),
           paidAmount: paid,
-          remainingAmount: remaining,
+          remainingAmount:
+            remaining,
           paymentStatus:
             remaining <= 0
               ? "paid"
@@ -1022,23 +982,19 @@ const getPatientDetails = async (req, res) => {
         };
       });
 
-    /*
-      =========================
-      ACCOUNT
-      =========================
-    */
-
     const account = {
       charges: {
         visits: visitCharges,
-        operations: operationCharges,
+        operations:
+          operationCharges,
         sales: salesCharges,
         total: totalCharges,
       },
 
       discounts: {
         visits: visitDiscounts,
-        operations: operationDiscounts,
+        operations:
+          operationDiscounts,
         sales: salesDiscounts,
         total: totalDiscounts,
       },
@@ -1059,7 +1015,8 @@ const getPatientDetails = async (req, res) => {
       patient,
 
       summary: {
-        visitsCount: visits.length,
+        visitsCount:
+          visits.length,
 
         operationsCount:
           operations.length,
@@ -1083,7 +1040,9 @@ const getPatientDetails = async (req, res) => {
         operationPaid,
         operationRemaining,
 
-        salesTotal: salesCharges,
+        salesTotal:
+          salesCharges,
+
         salesPaid,
         salesRemaining,
 
@@ -1111,21 +1070,24 @@ const getPatientDetails = async (req, res) => {
     });
   } catch (error) {
     console.error(
-      "Get patient details error:",
+      "Get Patient Details Error:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to get patient details",
-      error: error.message,
+      message: req.t(
+        "common.serverError"
+      ),
     });
   }
 };
 
-
-const createPatient = async (req, res) => {
+// Create Patient
+const createPatient = async (
+  req,
+  res
+) => {
   try {
     const {
       name,
@@ -1137,33 +1099,99 @@ const createPatient = async (req, res) => {
       address,
     } = req.body;
 
-    if (!name?.trim()) {
+    if (
+      typeof name !== "string" ||
+      !name.trim()
+    ) {
       return res.status(400).json({
         success: false,
-        message:
-          "Patient name is required",
+        message: req.t(
+          "patients.nameRequired"
+        ),
       });
     }
 
     const cleanPhone =
-      phone?.trim() || null;
+      typeof phone === "string" &&
+      phone.trim()
+        ? phone.trim()
+        : null;
 
     const cleanNationalId =
-      nationalId?.trim() || null;
+      typeof nationalId === "string" &&
+      nationalId.trim()
+        ? nationalId.trim()
+        : null;
+
+    const cleanEmail =
+      typeof email === "string" &&
+      email.trim()
+        ? email.trim().toLowerCase()
+        : null;
+
+    const cleanAddress =
+      typeof address === "string" &&
+      address.trim()
+        ? address.trim()
+        : null;
+
+    if (
+      cleanEmail &&
+      !isValidEmail(cleanEmail)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t(
+          "patients.invalidEmail"
+        ),
+      });
+    }
+
+    if (
+      gender !== undefined &&
+      gender !== null &&
+      !allowedGenders.includes(gender)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t(
+          "patients.invalidGender"
+        ),
+      });
+    }
+
+    if (dateOfBirth !== undefined) {
+      if (
+        dateOfBirth !== null &&
+        isNaN(
+          new Date(
+            dateOfBirth
+          ).getTime()
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: req.t(
+            "patients.invalidDateOfBirth"
+          ),
+        });
+      }
+    }
 
     if (cleanNationalId) {
       const existingPatient =
         await patientModels.findOne({
-          nationalId: cleanNationalId,
+          nationalId:
+            cleanNationalId,
           isActive: true,
         });
 
       if (existingPatient) {
         return res.status(409).json({
           success: false,
-          message:
-            "A patient with this national ID already exists",
-          patient: existingPatient,
+          message: req.t(
+            "patients.nationalIdAlreadyExists"
+          ),
         });
       }
     }
@@ -1178,9 +1206,9 @@ const createPatient = async (req, res) => {
       if (existingPatient) {
         return res.status(409).json({
           success: false,
-          message:
-            "A patient with this phone number already exists",
-          patient: existingPatient,
+          message: req.t(
+            "patients.phoneAlreadyExists"
+          ),
         });
       }
     }
@@ -1189,42 +1217,54 @@ const createPatient = async (req, res) => {
       await patientModels.create({
         name: name.trim(),
         phone: cleanPhone,
-        email:
-          email?.trim() || null,
+        email: cleanEmail,
         nationalId:
           cleanNationalId,
         dateOfBirth:
           dateOfBirth || null,
-        gender:
-          gender || null,
-        address:
-          address?.trim() || null,
+        gender: gender || null,
+        address: cleanAddress,
         isActive: true,
       });
 
     return res.status(201).json({
       success: true,
-      message:
-        "Patient created successfully",
+      message: req.t(
+        "patients.createdSuccessfully"
+      ),
       patient,
     });
   } catch (error) {
     console.error(
-      "Create patient error:",
+      "Create Patient Error:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to create patient",
-      error: error.message,
+      message: req.t(
+        "common.serverError"
+      ),
     });
   }
 };
 
-const updatePatient = async (req, res) => {
+const updatePatient = async (
+  req,
+  res
+) => {
   try {
+    const { id } = req.params;
+
+    if (
+      !mongoose.Types.ObjectId.isValid(id)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("common.invalidId"),
+      });
+    }
+
     const {
       name,
       phone,
@@ -1236,26 +1276,103 @@ const updatePatient = async (req, res) => {
       isActive,
     } = req.body;
 
-    if (!name?.trim()) {
+    if (
+      typeof name !== "string" ||
+      !name.trim()
+    ) {
       return res.status(400).json({
         success: false,
-        message:
-          "Patient name is required",
+        message: req.t(
+          "patients.nameRequired"
+        ),
       });
     }
 
+    if (
+      gender !== undefined &&
+      gender !== null &&
+      !allowedGenders.includes(gender)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t(
+          "patients.invalidGender"
+        ),
+      });
+    }
+
+    if (isActive !== undefined) {
+      if (typeof isActive !== "boolean") {
+        return res.status(400).json({
+          success: false,
+          message: req.t(
+            "patients.invalidIsActive"
+          ),
+        });
+      }
+    }
+
     const cleanPhone =
-      phone?.trim() || null;
+      typeof phone === "string" &&
+      phone.trim()
+        ? phone.trim()
+        : null;
 
     const cleanNationalId =
-      nationalId?.trim() || null;
+      typeof nationalId === "string" &&
+      nationalId.trim()
+        ? nationalId.trim()
+        : null;
+
+    const cleanEmail =
+      typeof email === "string" &&
+      email.trim()
+        ? email.trim().toLowerCase()
+        : null;
+
+    const cleanAddress =
+      typeof address === "string" &&
+      address.trim()
+        ? address.trim()
+        : null;
+
+    if (
+      cleanEmail &&
+      !isValidEmail(cleanEmail)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t(
+          "patients.invalidEmail"
+        ),
+      });
+    }
+
+    if (dateOfBirth !== undefined) {
+      if (
+        dateOfBirth !== null &&
+        isNaN(
+          new Date(
+            dateOfBirth
+          ).getTime()
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: req.t(
+            "patients.invalidDateOfBirth"
+          ),
+        });
+      }
+    }
 
     if (cleanNationalId) {
       const existingPatient =
         await patientModels.findOne({
-          nationalId: cleanNationalId,
+          nationalId:
+            cleanNationalId,
           _id: {
-            $ne: req.params.id,
+            $ne: id,
           },
           isActive: true,
         });
@@ -1263,8 +1380,9 @@ const updatePatient = async (req, res) => {
       if (existingPatient) {
         return res.status(409).json({
           success: false,
-          message:
-            "A patient with this national ID already exists",
+          message: req.t(
+            "patients.nationalIdAlreadyExists"
+          ),
         });
       }
     }
@@ -1274,7 +1392,7 @@ const updatePatient = async (req, res) => {
         await patientModels.findOne({
           phone: cleanPhone,
           _id: {
-            $ne: req.params.id,
+            $ne: id,
           },
           isActive: true,
         });
@@ -1282,29 +1400,28 @@ const updatePatient = async (req, res) => {
       if (existingPatient) {
         return res.status(409).json({
           success: false,
-          message:
-            "A patient with this phone number already exists",
+          message: req.t(
+            "patients.phoneAlreadyExists"
+          ),
         });
       }
     }
 
     const patient =
       await patientModels.findByIdAndUpdate(
-        req.params.id,
+        id,
         {
           name: name.trim(),
           phone: cleanPhone,
-          email:
-            email?.trim() || null,
+          email: cleanEmail,
           nationalId:
             cleanNationalId,
           dateOfBirth:
             dateOfBirth || null,
-          gender:
-            gender || null,
-          address:
-            address?.trim() || null,
-          ...(typeof isActive === "boolean"
+          gender: gender || null,
+          address: cleanAddress,
+
+          ...(isActive !== undefined
             ? { isActive }
             : {}),
         },
@@ -1317,69 +1434,93 @@ const updatePatient = async (req, res) => {
     if (!patient) {
       return res.status(404).json({
         success: false,
-        message:
-          "Patient not found",
+        message: req.t(
+          "patients.notFound"
+        ),
       });
     }
 
     return res.status(200).json({
       success: true,
-      message:
-        "Patient updated successfully",
+      message: req.t(
+        "patients.updatedSuccessfully"
+      ),
       patient,
     });
   } catch (error) {
     console.error(
-      "Update patient error:",
+      "Update Patient Error:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to update patient",
-      error: error.message,
+      message: req.t(
+        "common.serverError"
+      ),
     });
   }
 };
 
-const deactivatePatient = async (req, res) => {
+// Deactivate Patient
+const deactivatePatient = async (
+  req,
+  res
+) => {
   try {
+    const { id } = req.params;
+
+    if (
+      !mongoose.Types.ObjectId.isValid(id)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("common.invalidId"),
+      });
+    }
+
     const patient =
-      await patientModels.findByIdAndUpdate(
-        req.params.id,
-        {
-          isActive: false,
-        },
-        {
-          new: true,
-        }
-      );
+      await patientModels.findById(id);
 
     if (!patient) {
       return res.status(404).json({
         success: false,
-        message:
-          "Patient not found",
+        message: req.t(
+          "patients.notFound"
+        ),
       });
     }
 
+    if (!patient.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: req.t(
+          "patients.alreadyDeactivated"
+        ),
+      });
+    }
+
+    patient.isActive = false;
+
+    await patient.save();
+
     return res.status(200).json({
       success: true,
-      message:
-        "Patient deactivated successfully",
+      message: req.t(
+        "patients.deactivatedSuccessfully"
+      ),
     });
   } catch (error) {
     console.error(
-      "Deactivate patient error:",
+      "Deactivate Patient Error:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to deactivate patient",
-      error: error.message,
+      message: req.t(
+        "common.serverError"
+      ),
     });
   }
 };

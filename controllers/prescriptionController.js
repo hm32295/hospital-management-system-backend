@@ -1,5 +1,4 @@
 const mongoose = require("mongoose");
-
 const Prescription = require("../models/prescription.models");
 const Medicine = require("../models/medicine.models");
 const MedicineBatch = require("../models/medicineBatch.models");
@@ -8,271 +7,178 @@ const Consultation = require("../models/consultation.model");
 const Visit = require("../models/visit.model");
 const Sale = require("../models/sale.models");
 
+const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+const getPagination = (page, limit) => {
+  const pageNumber = Math.max(Number(page) || 1, 1);
+  const limitNumber = Math.min(Math.max(Number(limit) || 10, 1), 100);
+  return { pageNumber, limitNumber, skip: (pageNumber - 1) * limitNumber };
+};
+
+const validateItems = async (items, req) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { error: req.t("prescriptions.itemsRequired") };
+  }
+
+  for (const item of items) {
+    if (!item || !item.medicine || item.quantity === undefined || item.quantity === null || !item.dosage || !item.frequency || !item.duration) {
+      return { error: req.t("prescriptions.itemRequiredFields") };
+    }
+
+    if (!isValidId(item.medicine)) {
+      return { error: req.t("prescriptions.invalidMedicineId") };
+    }
+
+    if (!Number.isInteger(Number(item.quantity)) || Number(item.quantity) <= 0) {
+      return { error: req.t("prescriptions.invalidQuantity") };
+    }
+
+    if (typeof item.dosage !== "string" || !item.dosage.trim() || typeof item.frequency !== "string" || !item.frequency.trim() || typeof item.duration !== "string" || !item.duration.trim()) {
+      return { error: req.t("prescriptions.itemRequiredFields") };
+    }
+
+    const medicine = await Medicine.findById(item.medicine).select("_id isActive");
+    if (!medicine) {
+      return { status: 404, error: req.t("prescriptions.medicineNotFound") };
+    }
+
+    if (!medicine.isActive) {
+      return { status: 400, error: req.t("prescriptions.medicineInactive") };
+    }
+  }
+
+  return { error: null };
+};
+
+
+
 const createPrescription = async (req, res) => {
   try {
     const { consultation, items, notes } = req.body;
 
-    if (
-      !consultation ||
-      !items ||
-      !Array.isArray(items) ||
-      items.length === 0
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Consultation and prescription items are required",
-      });
+    if (!consultation || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, message: req.t("prescriptions.consultationItemsRequired") });
     }
 
-    const existingConsultation =
-      await Consultation.findById(consultation);
+    if (!isValidId(consultation)) {
+      return res.status(400).json({ success: false, message: req.t("prescriptions.invalidConsultationId") });
+    }
 
+    const existingConsultation = await Consultation.findById(consultation);
     if (!existingConsultation) {
-      return res.status(404).json({
-        success: false,
-        message: "Consultation not found",
-      });
+      return res.status(404).json({ success: false, message: req.t("prescriptions.consultationNotFound") });
     }
 
-    const existingVisit = await Visit.findById(
-      existingConsultation.visit
-    );
+    if (!existingConsultation.patient || !existingConsultation.doctor || !existingConsultation.visit) {
+      return res.status(400).json({ success: false, message: req.t("prescriptions.invalidConsultationData") });
+    }
 
+    if (!isValidId(existingConsultation.visit) || !isValidId(existingConsultation.patient) || !isValidId(existingConsultation.doctor)) {
+      return res.status(400).json({ success: false, message: req.t("prescriptions.invalidConsultationData") });
+    }
+
+    const existingVisit = await Visit.findById(existingConsultation.visit).select("patient doctor status");
     if (!existingVisit) {
-      return res.status(404).json({
-        success: false,
-        message: "Visit not found",
-      });
+      return res.status(404).json({ success: false, message: req.t("prescriptions.visitNotFound") });
     }
 
     if (existingVisit.status === "cancelled") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Cannot create prescription for a cancelled visit",
-      });
+      return res.status(400).json({ success: false, message: req.t("prescriptions.cancelledVisit") });
     }
 
     if (existingVisit.patient?.toString() !== existingConsultation.patient?.toString()) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Consultation patient does not match visit patient",
-      });
+      return res.status(400).json({ success: false, message: req.t("prescriptions.patientMismatch") });
     }
 
-    if (
-      existingVisit.doctor?.toString() !==
-      existingConsultation.doctor?.toString()
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Consultation doctor does not match visit doctor",
-      });
+    if (existingVisit.doctor?.toString() !== existingConsultation.doctor?.toString()) {
+      return res.status(400).json({ success: false, message: req.t("prescriptions.doctorMismatch") });
     }
 
-    const existingPrescription =
-      await Prescription.findOne({
-        consultation,
-      });
-
+    const existingPrescription = await Prescription.findOne({ consultation });
     if (existingPrescription) {
-      return res.status(409).json({
-        success: false,
-        message:
-          "Prescription already exists for this consultation",
-        prescription: existingPrescription,
-      });
+      return res.status(409).json({ success: false, message: req.t("prescriptions.alreadyExists"), prescription: existingPrescription });
     }
 
-    for (const item of items) {
-      if (
-        !item.medicine ||
-        !item.quantity ||
-        !item.dosage ||
-        !item.frequency ||
-        !item.duration
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Each prescription item must contain medicine, quantity, dosage, frequency and duration",
-        });
-      }
-
-      if (Number(item.quantity) <= 0) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Medicine quantity must be greater than zero",
-        });
-      }
-
-      const medicine = await Medicine.findById(
-        item.medicine
-      );
-
-      if (!medicine) {
-        return res.status(404).json({
-          success: false,
-          message:
-            `Medicine not found: ${item.medicine}`,
-        });
-      }
+    const validation = await validateItems(items, req);
+    if (validation.error) {
+      return res.status(validation.status || 400).json({ success: false, message: validation.error });
     }
 
-    const prescription =
-      await Prescription.create({
-        consultation,
-        patient: existingConsultation.patient,
-        items,
-        notes: notes?.trim() || null,
-        status: "Pending",
-        createdBy: req.user._id,
-      });
+    const prescription = await Prescription.create({
+      consultation,
+      patient: existingConsultation.patient,
+      items,
+      notes: typeof notes === "string" ? notes.trim() || null : null,
+      status: "Pending",
+      createdBy: req.user._id,
+    });
 
-    const createdPrescription =
-      await Prescription.findById(
-        prescription._id
-      )
-        .populate(
-          "patient",
-          "name phone email nationalId dateOfBirth gender"
-        )
-        .populate(
-          "createdBy",
-          "name email role"
-        )
-        .populate(
-          "consultation",
-          "visit patient doctor symptoms diagnosis notes createdAt updatedAt"
-        )
-        .populate(
-          "items.medicine",
-          "name genericName manufacturer"
-        );
+    const createdPrescription = await Prescription.findById(prescription._id)
+      .populate("patient", "name phone email nationalId dateOfBirth gender")
+      .populate("createdBy", "name email role")
+      .populate("consultation", "visit patient doctor symptoms diagnosis notes createdAt updatedAt")
+      .populate("items.medicine", "name genericName manufacturer");
 
     return res.status(201).json({
       success: true,
-      message:
-        "Prescription created successfully",
+      message: req.t("prescriptions.createdSuccessfully"),
       prescription: createdPrescription,
     });
   } catch (error) {
-    console.error(
-      "Create prescription error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    console.error("Create prescription error:", error);
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   }
 };
 
 const getAllPrescriptions = async (req, res) => {
   try {
-    const {
-      patient,
-      consultation,
-      status,
-      page = 1,
-      limit = 10,
-    } = req.query;
-
+    const { patient, consultation, status, page = 1, limit = 10 } = req.query;
     const filter = {};
 
     if (patient) {
+      if (!isValidId(patient)) {
+        return res.status(400).json({ success: false, message: req.t("prescriptions.invalidPatientId") });
+      }
       filter.patient = patient;
     }
 
     if (consultation) {
+      if (!isValidId(consultation)) {
+        return res.status(400).json({ success: false, message: req.t("prescriptions.invalidConsultationId") });
+      }
       filter.consultation = consultation;
     }
 
     if (status) {
-      const allowedStatuses = [
-        "Pending",
-        "Partially Dispensed",
-        "Dispensed",
-        "Cancelled",
-      ];
-
+      const allowedStatuses = ["Pending", "Partially Dispensed", "Dispensed", "Cancelled"];
       if (!allowedStatuses.includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid prescription status",
-        });
+        return res.status(400).json({ success: false, message: req.t("prescriptions.invalidStatus") });
       }
-
       filter.status = status;
     }
 
-    const pageNumber = Math.max(
-      Number(page) || 1,
-      1
-    );
+    const { pageNumber, limitNumber, skip } = getPagination(page, limit);
 
-    const limitNumber = Math.min(
-      Math.max(Number(limit) || 10, 1),
-      100
-    );
-
-    const skip =
-      (pageNumber - 1) * limitNumber;
-
-    const total =
-      await Prescription.countDocuments(filter);
-
-    const prescriptions =
-      await Prescription.find(filter)
-        .populate(
-          "patient",
-          "name phone email"
-        )
-        .populate(
-          "createdBy",
-          "name email role"
-        )
-        .populate(
-          "consultation",
-          "visit doctor symptoms diagnosis notes createdAt updatedAt"
-        )
-        .populate(
-          "items.medicine",
-          "name genericName manufacturer"
-        )
+    const [total, prescriptions] = await Promise.all([
+      Prescription.countDocuments(filter),
+      Prescription.find(filter)
+        .populate("patient", "name phone email")
+        .populate("createdBy", "name email role")
+        .populate("consultation", "visit doctor symptoms diagnosis notes createdAt updatedAt")
+        .populate("items.medicine", "name genericName manufacturer")
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(limitNumber);
+        .limit(limitNumber),
+    ]);
 
     return res.status(200).json({
       success: true,
       prescriptions,
-      pagination: {
-        page: pageNumber,
-        limit: limitNumber,
-        total,
-        pages: Math.ceil(
-          total / limitNumber
-        ),
-      },
+      pagination: { page: pageNumber, limit: limitNumber, total, pages: Math.ceil(total / limitNumber) },
     });
   } catch (error) {
-    console.error(
-      "Get prescriptions error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    console.error("Get prescriptions error:", error);
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   }
 };
 
@@ -280,47 +186,24 @@ const getSinglePrescription = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const prescription =
-      await Prescription.findById(id)
-        .populate(
-          "patient",
-          "name phone email nationalId dateOfBirth gender address"
-        )
-        .populate(
-          "createdBy",
-          "name email role"
-        )
-        .populate(
-          "consultation",
-          "visit patient doctor symptoms diagnosis notes createdAt updatedAt"
-        )
-        .populate(
-          "items.medicine",
-          "name genericName manufacturer"
-        );
-
-    if (!prescription) {
-      return res.status(404).json({
-        success: false,
-        message: "Prescription not found",
-      });
+    if (!isValidId(id)) {
+      return res.status(400).json({ success: false, message: req.t("common.invalidId") });
     }
 
-    return res.status(200).json({
-      success: true,
-      prescription,
-    });
-  } catch (error) {
-    console.error(
-      "Get prescription error:",
-      error
-    );
+    const prescription = await Prescription.findById(id)
+      .populate("patient", "name phone email nationalId dateOfBirth gender address")
+      .populate("createdBy", "name email role")
+      .populate("consultation", "visit patient doctor symptoms diagnosis notes createdAt updatedAt")
+      .populate("items.medicine", "name genericName manufacturer");
 
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    if (!prescription) {
+      return res.status(404).json({ success: false, message: req.t("prescriptions.notFound") });
+    }
+
+    return res.status(200).json({ success: true, prescription });
+  } catch (error) {
+    console.error("Get prescription error:", error);
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   }
 };
 
@@ -328,155 +211,65 @@ const updatePrescription = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const prescription =
-      await Prescription.findById(id);
+    if (!isValidId(id)) {
+      return res.status(400).json({ success: false, message: req.t("common.invalidId") });
+    }
 
+    const prescription = await Prescription.findById(id);
     if (!prescription) {
-      return res.status(404).json({
-        success: false,
-        message: "Prescription not found",
-      });
+      return res.status(404).json({ success: false, message: req.t("prescriptions.notFound") });
     }
 
     if (prescription.status === "Cancelled") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Cancelled prescription cannot be updated",
-      });
+      return res.status(400).json({ success: false, message: req.t("prescriptions.cancelledCannotUpdate") });
     }
 
     if (prescription.status === "Partially Dispensed") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Partially dispensed prescription cannot be updated",
-      });
+      return res.status(400).json({ success: false, message: req.t("prescriptions.partialCannotUpdate") });
     }
 
     if (prescription.status === "Dispensed") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Dispensed prescription cannot be updated",
-      });
+      return res.status(400).json({ success: false, message: req.t("prescriptions.dispensedCannotUpdate") });
     }
 
-    const existingSale =
-      await Sale.findOne({
-        prescription: prescription._id,
-      });
-
+    const existingSale = await Sale.findOne({ prescription: prescription._id }).select("_id");
     if (existingSale) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Prescription cannot be updated because a sale already exists for it",
-      });
+      return res.status(400).json({ success: false, message: req.t("prescriptions.saleExistsCannotUpdate") });
     }
 
-    const {
-      items,
-      notes,
-    } = req.body;
+    const { items, notes } = req.body;
 
     if (items !== undefined) {
-      if (
-        !Array.isArray(items) ||
-        items.length === 0
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Prescription must contain at least one item",
-        });
+      const validation = await validateItems(items, req);
+      if (validation.error) {
+        return res.status(validation.status || 400).json({ success: false, message: validation.error });
       }
-
-      for (const item of items) {
-        if (
-          !item.medicine ||
-          !item.quantity ||
-          !item.dosage ||
-          !item.frequency ||
-          !item.duration
-        ) {
-          return res.status(400).json({
-            success: false,
-            message:
-              "Each prescription item must contain medicine, quantity, dosage, frequency and duration",
-          });
-        }
-
-        if (Number(item.quantity) <= 0) {
-          return res.status(400).json({
-            success: false,
-            message:
-              "Medicine quantity must be greater than zero",
-          });
-        }
-
-        const medicine =
-          await Medicine.findById(
-            item.medicine
-          );
-
-        if (!medicine) {
-          return res.status(404).json({
-            success: false,
-            message:
-              `Medicine not found: ${item.medicine}`,
-          });
-        }
-      }
-
       prescription.items = items;
     }
 
     if (notes !== undefined) {
-      prescription.notes =
-        notes?.trim() || null;
+      if (notes !== null && typeof notes !== "string") {
+        return res.status(400).json({ success: false, message: req.t("prescriptions.invalidNotes") });
+      }
+      prescription.notes = typeof notes === "string" ? notes.trim() || null : null;
     }
 
     await prescription.save();
 
-    const updatedPrescription =
-      await Prescription.findById(
-        prescription._id
-      )
-        .populate(
-          "patient",
-          "name phone email"
-        )
-        .populate(
-          "createdBy",
-          "name email role"
-        )
-        .populate(
-          "consultation",
-          "visit patient doctor symptoms diagnosis notes createdAt updatedAt"
-        )
-        .populate(
-          "items.medicine",
-          "name genericName manufacturer"
-        );
+    const updatedPrescription = await Prescription.findById(prescription._id)
+      .populate("patient", "name phone email")
+      .populate("createdBy", "name email role")
+      .populate("consultation", "visit patient doctor symptoms diagnosis notes createdAt updatedAt")
+      .populate("items.medicine", "name genericName manufacturer");
 
     return res.status(200).json({
       success: true,
-      message:
-        "Prescription updated successfully",
+      message: req.t("prescriptions.updatedSuccessfully"),
       prescription: updatedPrescription,
     });
   } catch (error) {
-    console.error(
-      "Update prescription error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    console.error("Update prescription error:", error);
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   }
 };
 
@@ -484,76 +277,43 @@ const cancelPrescription = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const prescription =
-      await Prescription.findById(id);
+    if (!isValidId(id)) {
+      return res.status(400).json({ success: false, message: req.t("common.invalidId") });
+    }
 
+    const prescription = await Prescription.findById(id);
     if (!prescription) {
-      return res.status(404).json({
-        success: false,
-        message: "Prescription not found",
-      });
+      return res.status(404).json({ success: false, message: req.t("prescriptions.notFound") });
     }
 
     if (prescription.status === "Dispensed") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Dispensed prescription cannot be cancelled",
-      });
+      return res.status(400).json({ success: false, message: req.t("prescriptions.dispensedCannotCancel") });
     }
 
     if (prescription.status === "Cancelled") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Prescription is already cancelled",
-      });
+      return res.status(400).json({ success: false, message: req.t("prescriptions.alreadyCancelled") });
     }
 
-    if (
-      prescription.status === "Partially Dispensed"
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Partially dispensed prescription cannot be cancelled",
-      });
+    if (prescription.status === "Partially Dispensed") {
+      return res.status(400).json({ success: false, message: req.t("prescriptions.partialCannotCancel") });
     }
 
-    const existingSale =
-      await Sale.findOne({
-        prescription: prescription._id,
-      });
-
+    const existingSale = await Sale.findOne({ prescription: prescription._id }).select("_id");
     if (existingSale) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Prescription cannot be cancelled because a sale already exists for it",
-      });
+      return res.status(400).json({ success: false, message: req.t("prescriptions.saleExistsCannotCancel") });
     }
 
     prescription.status = "Cancelled";
-
     await prescription.save();
 
     return res.status(200).json({
       success: true,
-      message:
-        "Prescription cancelled successfully",
+      message: req.t("prescriptions.cancelledSuccessfully"),
       prescription,
     });
   } catch (error) {
-    console.error(
-      "Cancel prescription error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    console.error("Cancel prescription error:", error);
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   }
 };
 
@@ -563,108 +323,106 @@ const dispensePrescription = async (req, res) => {
   try {
     session.startTransaction();
 
-    const prescription =
-      await Prescription.findById(
-        req.params.id
-      ).session(session);
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      await session.abortTransaction();
+      return res.status(400).json({success: false,message: req.t("common.invalidId")});
+    }
+
+    const prescription = await Prescription.findById(id).session(session);
 
     if (!prescription) {
-      throw new Error(
-        "Prescription not found"
-      );
+      await session.abortTransaction();
+      return res.status(404).json({
+        success: false,
+        message: req.t("prescriptions.notFound"),
+      });
     }
 
     if (prescription.status === "Cancelled") {
-      throw new Error(
-        "Cancelled prescription cannot be dispensed"
-      );
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: req.t("prescriptions.cancelledCannotDispense"),
+      });
     }
 
     if (prescription.status === "Dispensed") {
-      throw new Error(
-        "Prescription is already fully dispensed"
-      );
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: req.t("prescriptions.alreadyDispensed"),
+      });
     }
 
-    const sale =
-      await Sale.findOne({
-        prescription: prescription._id,
-      }).session(session);
+    const sale = await Sale.findOne({
+      prescription: prescription._id,
+    }).session(session);
 
     if (!sale) {
-      throw new Error(
-        "Prescription must be converted to a sale before dispensing"
-      );
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: req.t("prescriptions.saleRequired"),
+      });
     }
 
     if (sale.status === "cancelled") {
-      throw new Error(
-        "Cancelled sale cannot be dispensed"
-      );
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: req.t("prescriptions.cancelledSale"),
+      });
     }
 
-    if (
-      sale.status !== "completed" ||
-      sale.paymentStatus !== "paid"
-    ) {
-      throw new Error(
-        "Prescription cannot be dispensed before the sale is fully paid"
-      );
+    if (sale.status !== "completed" || sale.paymentStatus !== "paid") {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: req.t("prescriptions.saleNotPaid"),
+      });
     }
 
     const itemsToDispense = [];
 
     for (const item of prescription.items) {
-      const remainingQuantity =
-        item.quantity -
-        item.dispensedQuantity;
+      const remainingQuantity = Number(item.quantity) - Number(item.dispensedQuantity || 0);
 
       if (remainingQuantity < 0) {
-        throw new Error(
-          `Invalid dispensed quantity for medicine ${item.medicine}`
-        );
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: req.t("prescriptions.invalidDispensedQuantity"),
+        });
       }
 
-      if (remainingQuantity === 0) {
-        continue;
-      }
+      if (remainingQuantity === 0) continue;
 
-      const batches =
-        await MedicineBatch.find({
-          medicine: item.medicine,
-          isActive: true,
-          quantity: { $gt: 0 },
-          expiryDate: {
-            $gte: new Date(),
-          },
-        })
-          .sort({
-            expiryDate: 1,
-          })
-          .session(session);
+      const batches = await MedicineBatch.find({
+        medicine: item.medicine,
+        isActive: true,
+        quantity: { $gt: 0 },
+        expiryDate: { $gte: new Date() },
+      })
+        .sort({ expiryDate: 1 })
+        .session(session);
 
-      const totalAvailable =
-        batches.reduce(
-          (total, batch) =>
-            total + batch.quantity,
-          0
-        );
+      const totalAvailable = batches.reduce((total, batch) => total + Number(batch.quantity), 0);
 
-      if (
-        totalAvailable <
-        remainingQuantity
-      ) {
-        const medicine =
-          await Medicine.findById(
-            item.medicine
-          ).session(session);
+      if (totalAvailable < remainingQuantity) {
+        const medicine = await Medicine.findById(item.medicine).select("name").session(session);
 
-        throw new Error(
-          `Insufficient stock for ${
-            medicine?.name ||
-            item.medicine
-          }. Required: ${remainingQuantity}, Available: ${totalAvailable}`
-        );
+        await session.abortTransaction();
+
+        return res.status(400).json({
+          success: false,
+          message: req.t("prescriptions.insufficientStock", {
+            medicine: medicine?.name || item.medicine,
+            required: remainingQuantity,
+            available: totalAvailable,
+          }),
+        });
       }
 
       itemsToDispense.push({
@@ -675,222 +433,136 @@ const dispensePrescription = async (req, res) => {
     }
 
     if (itemsToDispense.length === 0) {
-      throw new Error(
-        "No medicines remaining to dispense"
-      );
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: req.t("prescriptions.noRemainingMedicines"),
+      });
     }
 
     const processedItems = [];
 
-    for (const {
-      item,
-      batches,
-      remainingQuantity,
-    } of itemsToDispense) {
-      let quantityToDispense =
-        remainingQuantity;
-
+    for (const { item, batches, remainingQuantity } of itemsToDispense) {
+      let quantityToDispense = remainingQuantity;
       let dispensedNow = 0;
-
       const transactions = [];
 
       for (const batch of batches) {
-        if (quantityToDispense <= 0) {
-          break;
-        }
+        if (quantityToDispense <= 0) break;
 
-        const quantityFromBatch =
-          Math.min(
-            batch.quantity,
-            quantityToDispense
-          );
+        const quantityFromBatch = Math.min(
+          Number(batch.quantity),
+          quantityToDispense
+        );
 
-        batch.quantity -=
-          quantityFromBatch;
+        batch.quantity -= quantityFromBatch;
 
-        await batch.save({
-          session,
-        });
+        await batch.save({ session });
 
         await StockTransaction.create(
-          [
-            {
-              medicine: item.medicine,
-              batch: batch._id,
-              type: "OUT",
-              quantity: quantityFromBatch,
-              reason:
-                `Prescription ${prescription._id}`,
-              user: req.user._id,
-            },
-          ],
-          {
-            session,
-          }
+          [{
+            medicine: item.medicine,
+            batch: batch._id,
+            type: "OUT",
+            quantity: quantityFromBatch,
+            reason: `Prescription ${prescription._id}`,
+            user: req.user._id,
+          }],
+          { session }
         );
 
         transactions.push({
           batch: batch._id,
           quantity: quantityFromBatch,
-          expiryDate:
-            batch.expiryDate,
+          expiryDate: batch.expiryDate,
         });
 
-        dispensedNow +=
-          quantityFromBatch;
-
-        quantityToDispense -=
-          quantityFromBatch;
+        dispensedNow += quantityFromBatch;
+        quantityToDispense -= quantityFromBatch;
       }
 
-      item.dispensedQuantity +=
-        dispensedNow;
+      item.dispensedQuantity = Number(item.dispensedQuantity || 0) + dispensedNow;
 
       processedItems.push({
         medicine: item.medicine,
         requested: item.quantity,
         dispensedNow,
-        totalDispensed:
-          item.dispensedQuantity,
-        remaining:
-          item.quantity -
-          item.dispensedQuantity,
+        totalDispensed: item.dispensedQuantity,
+        remaining: Number(item.quantity) - Number(item.dispensedQuantity),
         transactions,
       });
     }
 
-    const allDispensed =
-      prescription.items.every(
-        (item) =>
-          item.dispensedQuantity >=
-          item.quantity
-      );
+    const allDispensed = prescription.items.every(
+      (item) => Number(item.dispensedQuantity || 0) >= Number(item.quantity)
+    );
 
-    const anyDispensed =
-      prescription.items.some(
-        (item) =>
-          item.dispensedQuantity > 0
-      );
+    const anyDispensed = prescription.items.some(
+      (item) => Number(item.dispensedQuantity || 0) > 0
+    );
 
-    if (allDispensed) {
-      prescription.status =
-        "Dispensed";
-    } else if (anyDispensed) {
-      prescription.status =
-        "Partially Dispensed";
-    } else {
-      prescription.status =
-        "Pending";
-    }
+    prescription.status = allDispensed
+      ? "Dispensed"
+      : anyDispensed
+        ? "Partially Dispensed"
+        : "Pending";
 
-    await prescription.save({
-      session,
-    });
+    await prescription.save({ session });
 
     await session.commitTransaction();
 
-    const updatedPrescription =
-      await Prescription.findById(
-        prescription._id
-      )
-        .populate(
-          "patient",
-          "name phone email"
-        )
-        .populate(
-          "createdBy",
-          "name email role"
-        )
-        .populate(
-          "consultation",
-          "visit patient doctor symptoms diagnosis notes"
-        )
-        .populate(
-          "items.medicine",
-          "name genericName manufacturer"
-        );
+    const updatedPrescription = await Prescription.findById(prescription._id)
+      .populate("patient", "name phone email")
+      .populate("createdBy", "name email role")
+      .populate("consultation", "visit patient doctor symptoms diagnosis notes")
+      .populate("items.medicine", "name genericName manufacturer");
 
     return res.status(200).json({
       success: true,
-      message:
-        "Prescription dispensed successfully",
-      status:
-        updatedPrescription.status,
-      prescription:
-        updatedPrescription,
+      message: req.t("prescriptions.dispensedSuccessfully"),
+      status: updatedPrescription.status,
+      prescription: updatedPrescription,
       processedItems,
     });
   } catch (error) {
-    await session.abortTransaction();
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
 
-    console.error(
-      "Dispense prescription error:",
-      error
-    );
+    console.error("Dispense prescription error:", error);
 
-    return res.status(400).json({
+    return res.status(500).json({
       success: false,
-      message: error.message,
+      message: req.t("common.serverError"),
     });
   } finally {
     await session.endSession();
   }
 };
+
 const getPrescriptionByConsultation = async (req, res) => {
   try {
     const { consultationId } = req.params;
 
-    const prescription =
-      await Prescription.findOne({
-        consultation: consultationId,
-      })
-        .populate(
-          "patient",
-          "name phone email nationalId dateOfBirth gender address"
-        )
-        .populate(
-          "createdBy",
-          "name email role"
-        )
-        .populate(
-          "consultation",
-          "visit patient doctor symptoms diagnosis notes createdAt updatedAt"
-        )
-        .populate(
-          "items.medicine",
-          "name genericName manufacturer"
-        );
-
-    if (!prescription) {
-      return res.status(404).json({
-        success: false,
-        message: "Prescription not found for this consultation",
-      });
+    if (!isValidId(consultationId)) {
+      return res.status(400).json({ success: false, message: req.t("prescriptions.invalidConsultationId") });
     }
 
-    return res.status(200).json({
-      success: true,
-      prescription,
-    });
-  } catch (error) {
-    console.error(
-      "Get prescription by consultation error:",
-      error
-    );
+    const prescription = await Prescription.findOne({ consultation: consultationId })
+      .populate("patient", "name phone email nationalId dateOfBirth gender address")
+      .populate("createdBy", "name email role")
+      .populate("consultation", "visit patient doctor symptoms diagnosis notes createdAt updatedAt")
+      .populate("items.medicine", "name genericName manufacturer");
 
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    if (!prescription) {
+      return res.status(404).json({ success: false, message: req.t("prescriptions.notFoundForConsultation") });
+    }
+
+    return res.status(200).json({ success: true, prescription });
+  } catch (error) {
+    console.error("Get prescription by consultation error:", error);
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   }
 };
-module.exports = {
-  createPrescription,
-  getAllPrescriptions,
-  getSinglePrescription,
-  updatePrescription,
-  cancelPrescription,
-  dispensePrescription,
-  getPrescriptionByConsultation
-};
+
+module.exports = { createPrescription, getAllPrescriptions, getSinglePrescription, updatePrescription, cancelPrescription, dispensePrescription, getPrescriptionByConsultation };

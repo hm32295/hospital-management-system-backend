@@ -1,22 +1,19 @@
+const mongoose = require("mongoose");
 const medicineModels = require("../models/medicine.models");
 const medicineCategoryModels = require("../models/medicineCategory.models");
 
-
 const createMedicine = async (req, res) => {
   try {
-    // Support single medicine or multiple medicines
-    const medicines = Array.isArray(req.body.medicines)? req.body.medicines: [req.body];
+    const medicines = Array.isArray(req.body.medicines)
+      ? req.body.medicines
+      : [req.body];
 
     if (medicines.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "At least one medicine is required",
+        message: req.t("medicines.medicinesRequired"),
       });
     }
-
-    // --------------------------------
-    // Validate all medicines
-    // --------------------------------
 
     const formattedMedicines = [];
 
@@ -29,39 +26,58 @@ const createMedicine = async (req, res) => {
         description,
       } = medicine;
 
-      // Required fields
-      if (!name || !category) {
+      if (
+        typeof name !== "string" ||
+        !name.trim() ||
+        !category
+      ) {
         return res.status(400).json({
           success: false,
-          message: "Medicine name and category are required",
+          message: req.t("medicines.nameCategoryRequired"),
         });
       }
 
-      // Check category
+      if (!mongoose.Types.ObjectId.isValid(category)) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("common.invalidId"),
+        });
+      }
+
+      const medicineName = name.trim();
+
+      const medicineManufacturer =
+        typeof manufacturer === "string"
+          ? manufacturer.trim()
+          : "";
+
+      const medicineGenericName =
+        typeof genericName === "string"
+          ? genericName.trim()
+          : "";
+
+      const medicineDescription =
+        typeof description === "string"
+          ? description.trim()
+          : "";
+
       const categoryExists =
         await medicineCategoryModels.findById(category);
 
       if (!categoryExists) {
         return res.status(404).json({
           success: false,
-          message: `Medicine category not found for medicine: ${name}`,
+          message: req.t("medicines.categoryNotFound"),
         });
       }
 
-      // Check category status
       if (!categoryExists.isActive) {
         return res.status(400).json({
           success: false,
-          message: `Medicine category is inactive for medicine: ${name}`,
+          message: req.t("medicines.categoryInactive"),
         });
       }
 
-      // Clean values
-      const medicineName = name.trim();
-      const medicineManufacturer =
-        manufacturer?.trim() || "";
-
-      // Check duplicate in database
       const existingMedicine =
         await medicineModels.findOne({
           name: medicineName,
@@ -71,11 +87,11 @@ const createMedicine = async (req, res) => {
       if (existingMedicine) {
         return res.status(409).json({
           success: false,
-          message: `Medicine already exists: ${medicineName}`,
+          message: req.t("medicines.medicineAlreadyExists"),
+          medicine: medicineName,
         });
       }
 
-      // Check duplicate inside the same request
       const duplicateInRequest =
         formattedMedicines.some(
           (item) =>
@@ -88,82 +104,135 @@ const createMedicine = async (req, res) => {
       if (duplicateInRequest) {
         return res.status(409).json({
           success: false,
-          message: `Duplicate medicine in request: ${medicineName}`,
+          message: req.t(
+            "medicines.duplicateMedicineInRequest"
+          ),
+          medicine: medicineName,
         });
       }
 
       formattedMedicines.push({
         name: medicineName,
-        genericName: genericName?.trim() || "",
+        genericName: medicineGenericName,
         category,
         manufacturer: medicineManufacturer,
-        description: description?.trim() || "",
+        description: medicineDescription,
       });
     }
 
-    // --------------------------------
-    // Create medicines
-    // --------------------------------
-
     const createdMedicines =
-      await medicineModels.insertMany(formattedMedicines);
+      await medicineModels.insertMany(
+        formattedMedicines
+      );
 
     return res.status(201).json({
       success: true,
-      message:
+      message: req.t(
         createdMedicines.length === 1
-          ? "Medicine created successfully"
-          : "Medicines created successfully",
-
+          ? "medicines.medicineCreatedSuccessfully"
+          : "medicines.medicinesCreatedSuccessfully"
+      ),
       count: createdMedicines.length,
-
       medicines: createdMedicines,
     });
-
   } catch (error) {
-    console.error("CREATE MEDICINE ERROR:", error);
+    console.error("Create Medicine Error:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("common.serverError"),
     });
   }
 };
 
-
-// Get All Medicines
 const getAllMedicines = async (req, res) => {
-  console.log('medicine');
-  
   try {
-    const { search, category, manufacturer, isActive, page = 1, limit = 10 } = req.query;
+    const {
+      search,
+      category,
+      manufacturer,
+      isActive,
+      page = 1,
+      limit = 10,
+    } = req.query;
 
     const filter = {};
-    // Search
-    if (search) {
+
+    if (search?.trim()) {
+      const searchValue = search.trim();
+
       filter.$or = [
-        {name: {$regex: search,$options: "i"} },
-        {genericName: { $regex: search, $options: "i"}},
-        {manufacturer: {  $regex: search,  $options: "i"}},
+        {
+          name: {
+            $regex: searchValue,
+            $options: "i",
+          },
+        },
+        {
+          genericName: {
+            $regex: searchValue,
+            $options: "i",
+          },
+        },
+        {
+          manufacturer: {
+            $regex: searchValue,
+            $options: "i",
+          },
+        },
       ];
     }
-    // Category filter
-    if (category) filter.category = category
 
-    // Manufacturer filter
-    if (manufacturer)  filter.manufacturer = {$regex: manufacturer,$options: "i"}
+    if (category) {
+      if (!mongoose.Types.ObjectId.isValid(category)) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("common.invalidId"),
+        });
+      }
 
-    // Active filter
-    if (isActive !== undefined) filter.isActive = isActive === "true";
+      filter.category = category;
+    }
 
-    // Pagination
-    const pageNumber = Math.max(Number(page) || 1, 1); // 10
-    const limitNumber = Math.min(Math.max(Number(limit) || 10, 1), 100 ); //15
+    if (manufacturer?.trim()) {
+      filter.manufacturer = {
+        $regex: manufacturer.trim(),
+        $options: "i",
+      };
+    }
 
-    const skip = (pageNumber - 1) * limitNumber;
-    const total = await medicineModels.countDocuments(filter);
-    const medicines = await medicineModels.find(filter)
+    if (isActive !== undefined) {
+      if (
+        isActive !== "true" &&
+        isActive !== "false"
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("medicines.invalidIsActive"),
+        });
+      }
+
+      filter.isActive = isActive === "true";
+    }
+
+    const pageNumber = Math.max(
+      Number(page) || 1,
+      1
+    );
+
+    const limitNumber = Math.min(
+      Math.max(Number(limit) || 10, 1),
+      100
+    );
+
+    const skip =
+      (pageNumber - 1) * limitNumber;
+
+    const total =
+      await medicineModels.countDocuments(filter);
+
+    const medicines = await medicineModels
+      .find(filter)
       .populate("category", "name")
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -172,29 +241,49 @@ const getAllMedicines = async (req, res) => {
     return res.status(200).json({
       success: true,
       medicines,
-      pagination: { page: pageNumber, limit: limitNumber, total, pages: Math.ceil(total / limitNumber)}
+      pagination: {
+        page: pageNumber,
+        limit: limitNumber,
+        total,
+        pages: Math.ceil(
+          total / limitNumber
+        ),
+      },
     });
   } catch (error) {
+    console.error("Get All Medicines Error:", error);
+
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("common.serverError"),
     });
   }
 };
 
-// Get Single Medicine
 const getMedicineById = async (req, res) => {
   try {
-    const medicine = await medicineModels.findById(req.params.id).populate(
-      "category",
-      "name description"
-    );
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("common.invalidId"),
+      });
+    }
+
+    const medicine = await medicineModels
+      .findById(id)
+      .populate(
+        "category",
+        "name description"
+      );
 
     if (!medicine) {
       return res.status(404).json({
         success: false,
-        message: "Medicine not found",
+        message: req.t(
+          "medicines.medicineNotFound"
+        ),
       });
     }
 
@@ -203,42 +292,131 @@ const getMedicineById = async (req, res) => {
       medicine,
     });
   } catch (error) {
+    console.error("Get Medicine By ID Error:", error);
+
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("common.serverError"),
     });
   }
 };
 
-// Update Medicine
 const updateMedicine = async (req, res) => {
   try {
-    const { name, genericName, category, manufacturer, description, isActive,} = req.body;
+    const { id } = req.params;
 
-    const medicine = await medicineModels.findById(req.params.id);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("common.invalidId"),
+      });
+    }
+
+    const {
+      name,
+      genericName,
+      category,
+      manufacturer,
+      description,
+      isActive,
+    } = req.body;
+
+    const medicine =
+      await medicineModels.findById(id);
 
     if (!medicine) {
       return res.status(404).json({
         success: false,
-        message: "Medicine not found",
+        message: req.t(
+          "medicines.medicineNotFound"
+        ),
       });
     }
 
+    let finalName = medicine.name;
+    let finalManufacturer = medicine.manufacturer;
+
+    if (name !== undefined) {
+      if (
+        typeof name !== "string" ||
+        !name.trim()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: req.t(
+            "medicines.invalidName"
+          ),
+        });
+      }
+
+      finalName = name.trim();
+    }
+
+    if (manufacturer !== undefined) {
+      if (typeof manufacturer !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: req.t(
+            "medicines.invalidManufacturer"
+          ),
+        });
+      }
+
+      finalManufacturer =
+        manufacturer.trim();
+    }
+
+    if (
+      name !== undefined ||
+      manufacturer !== undefined
+    ) {
+      const existingMedicine =
+        await medicineModels.findOne({
+          name: finalName,
+          manufacturer: finalManufacturer,
+          _id: { $ne: id },
+        });
+
+      if (existingMedicine) {
+        return res.status(409).json({
+          success: false,
+          message: req.t(
+            "medicines.medicineAlreadyExists"
+          ),
+        });
+      }
+    }
+
     if (category !== undefined) {
-      const categoryExists = await medicineCategoryModels.findById(category);
+      if (
+        !mongoose.Types.ObjectId.isValid(category)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: req.t("common.invalidId"),
+        });
+      }
+
+      const categoryExists =
+        await medicineCategoryModels.findById(
+          category
+        );
 
       if (!categoryExists) {
         return res.status(404).json({
           success: false,
-          message: "Medicine category not found",
+          message: req.t(
+            "medicines.categoryNotFound"
+          ),
         });
       }
 
       if (!categoryExists.isActive) {
         return res.status(400).json({
           success: false,
-          message: "Medicine category is inactive",
+          message: req.t(
+            "medicines.categoryInactive"
+          ),
         });
       }
 
@@ -246,50 +424,95 @@ const updateMedicine = async (req, res) => {
     }
 
     if (name !== undefined) {
-      medicine.name = name.trim();
+      medicine.name = finalName;
     }
 
     if (genericName !== undefined) {
-      medicine.genericName = genericName;
+      if (typeof genericName !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: req.t(
+            "medicines.invalidGenericName"
+          ),
+        });
+      }
+
+      medicine.genericName =
+        genericName.trim();
     }
 
     if (manufacturer !== undefined) {
-      medicine.manufacturer = manufacturer;
+      medicine.manufacturer =
+        finalManufacturer;
     }
 
     if (description !== undefined) {
-      medicine.description = description;
+      if (typeof description !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: req.t(
+            "medicines.invalidDescription"
+          ),
+        });
+      }
+
+      medicine.description =
+        description.trim();
     }
 
     if (isActive !== undefined) {
+      if (typeof isActive !== "boolean") {
+        return res.status(400).json({
+          success: false,
+          message: req.t(
+            "medicines.invalidIsActive"
+          ),
+        });
+      }
+
       medicine.isActive = isActive;
     }
 
-    const updatedMedicine = await medicine.save();
+    const updatedMedicine =
+      await medicine.save();
 
     return res.status(200).json({
       success: true,
-      message: "Medicine updated successfully",
+      message: req.t(
+        "medicines.medicineUpdatedSuccessfully"
+      ),
       medicine: updatedMedicine,
     });
   } catch (error) {
+    console.error("Update Medicine Error:", error);
+
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("common.serverError"),
     });
   }
 };
 
-// Deactivate Medicine
 const deleteMedicine = async (req, res) => {
   try {
-    const medicine = await medicineModels.findById(req.params.id);
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: req.t("common.invalidId"),
+      });
+    }
+
+    const medicine =
+      await medicineModels.findById(id);
 
     if (!medicine) {
       return res.status(404).json({
         success: false,
-        message: "Medicine not found",
+        message: req.t(
+          "medicines.medicineNotFound"
+        ),
       });
     }
 
@@ -299,13 +522,16 @@ const deleteMedicine = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Medicine deactivated successfully",
+      message: req.t(
+        "medicines.medicineDeactivatedSuccessfully"
+      ),
     });
   } catch (error) {
+    console.error("Delete Medicine Error:", error);
+
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: req.t("common.serverError"),
     });
   }
 };

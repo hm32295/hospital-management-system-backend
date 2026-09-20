@@ -1,485 +1,232 @@
 const mongoose = require("mongoose");
-
 const cashDrawerModels = require("../models/cashDrawer.models");
 
+const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 
-// ==========================================
-// Open Cash Drawer
-// ==========================================
+const parseAmount = (value) => {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 0 ? Number(amount.toFixed(2)) : null;
+};
+
 const openCashDrawer = async (req, res) => {
   const session = await mongoose.startSession();
-
   try {
-    const {
-      openingBalance = 0,
-      notes = "",
-    } = req.body;
+    const { openingBalance = 0, notes = "" } = req.body;
+    const balance = parseAmount(openingBalance);
 
-    // ==========================================
-    // Validate Opening Balance
-    // ==========================================
+    if (balance === null) {
+      return res.status(400).json({ success: false, message: req.t("cashDrawers.invalidOpeningBalance") });
+    }
 
-    const balance = Number(openingBalance);
-
-    if (
-      !Number.isFinite(balance) ||
-      balance < 0
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Opening balance cannot be negative",
-      });
+    if (typeof notes !== "string") {
+      return res.status(400).json({ success: false, message: req.t("cashDrawers.invalidNotes") });
     }
 
     session.startTransaction();
 
-    // ==========================================
-    // Check Existing Open Drawer
-    // ==========================================
-
-    const existingOpenDrawer =
-      await cashDrawerModels
-        .findOne({
-          status: "open",
-        })
-        .session(session);
+    const existingOpenDrawer = await cashDrawerModels.findOne({ status: "open" }).session(session);
 
     if (existingOpenDrawer) {
-      throw new Error(
-        "There is already an open cash drawer"
-      );
+      return res.status(409).json({ success: false, message: req.t("cashDrawers.alreadyOpen") });
     }
 
-    // ==========================================
-    // Create Cash Drawer
-    // ==========================================
-
-    const drawer =
-      await cashDrawerModels.create(
-        [
-          {
-            openedBy: req.user._id,
-
-            openingBalance: balance,
-
-            expectedCash: balance,
-
-            actualCash: 0,
-
-            difference: 0,
-
-            status: "open",
-
-            openedAt: new Date(),
-
-            notes,
-          },
-        ],
-        {
-          session,
-        }
-      );
+    const drawer = await cashDrawerModels.create([{
+      openedBy: req.user._id,
+      openingBalance: balance,
+      expectedCash: balance,
+      actualCash: 0,
+      difference: 0,
+      status: "open",
+      openedAt: new Date(),
+      notes: notes.trim(),
+    }], { session });
 
     await session.commitTransaction();
 
-    // ==========================================
-    // Get Created Drawer
-    // ==========================================
-
-    const createdDrawer =
-      await cashDrawerModels
-        .findById(drawer[0]._id)
-        .populate(
-          "openedBy",
-          "name email role"
-        );
+    const createdDrawer = await cashDrawerModels.findById(drawer[0]._id)
+      .populate("openedBy", "name email role")
+      .populate("closedBy", "name email role");
 
     return res.status(201).json({
       success: true,
-
-      message:
-        "Cash drawer opened successfully",
-
-      cashDrawer:
-        createdDrawer,
+      message: req.t("cashDrawers.openedSuccessfully"),
+      cashDrawer: createdDrawer,
     });
-
   } catch (error) {
-
-    await session.abortTransaction();
-
-    console.error(
-      "Open cash drawer error:",
-      error
-    );
-
-    return res.status(400).json({
-      success: false,
-      message: error.message,
-    });
-
+    if (session.inTransaction()) await session.abortTransaction();
+    console.error("Open cash drawer error:", error);
+    if (error?.code === 11000) {
+      return res.status(409).json({ success: false, message: req.t("cashDrawers.alreadyOpen") });
+    }
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   } finally {
     await session.endSession();
   }
 };
 
-
-// ==========================================
-// Get Current Open Cash Drawer
-// ==========================================
-const getCurrentCashDrawer = async (
-  req,
-  res
-) => {
+const getCurrentCashDrawer = async (req, res) => {
   try {
-
-    const drawer =
-      await cashDrawerModels
-        .findOne({
-          status: "open",
-        })
-        .populate(
-          "openedBy",
-          "name email role"
-        );
+    const drawer = await cashDrawerModels.findOne({ status: "open" })
+      .populate("openedBy", "name email role")
+      .populate("closedBy", "name email role");
 
     if (!drawer) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "No open cash drawer found",
-      });
+      return res.status(404).json({ success: false, message: req.t("cashDrawers.notFoundOpen") });
     }
 
     return res.status(200).json({
       success: true,
-
       cashDrawer: drawer,
     });
-
   } catch (error) {
-
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
-
+    console.error("Get current cash drawer error:", error);
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   }
 };
 
-
-// ==========================================
-// Close Cash Drawer
-// ==========================================
-const closeCashDrawer = async (
-  req,
-  res
-) => {
+const closeCashDrawer = async (req, res) => {
   const session = await mongoose.startSession();
-
   try {
+    const { actualCash, notes } = req.body;
 
-    const {
-      actualCash,
-      notes,
-    } = req.body;
+    if (!isValidId(req.params.id)) {
+      return res.status(400).json({ success: false, message: req.t("cashDrawers.invalidId") });
+    }
 
-    // ==========================================
-    // Validate Actual Cash
-    // ==========================================
+    const actual = parseAmount(actualCash);
 
-    const actual =
-      Number(actualCash);
+    if (actual === null) {
+      return res.status(400).json({ success: false, message: req.t("cashDrawers.invalidActualCash") });
+    }
 
-    if (
-      !Number.isFinite(actual) ||
-      actual < 0
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Actual cash cannot be negative",
-      });
+    if (notes !== undefined && typeof notes !== "string") {
+      return res.status(400).json({ success: false, message: req.t("cashDrawers.invalidNotes") });
     }
 
     session.startTransaction();
 
-    // ==========================================
-    // Find Drawer
-    // ==========================================
-
-    const drawer =
-      await cashDrawerModels
-        .findById(req.params.id)
-        .session(session);
+    const drawer = await cashDrawerModels.findById(req.params.id).session(session);
 
     if (!drawer) {
-      throw new Error(
-        "Cash drawer not found"
-      );
+      return res.status(404).json({ success: false, message: req.t("cashDrawers.notFound") });
     }
 
-    // ==========================================
-    // Check Status
-    // ==========================================
-
-    if (
-      drawer.status !== "open"
-    ) {
-      throw new Error(
-        "Cash drawer is already closed"
-      );
+    if (drawer.status !== "open") {
+      return res.status(400).json({ success: false, message: req.t("cashDrawers.alreadyClosed") });
     }
 
-    // ==========================================
-    // Calculate Difference
-    // ==========================================
-
-    const difference =
-      Number(
-        (
-          actual -
-          drawer.expectedCash
-        ).toFixed(2)
-      );
-
-    // ==========================================
-    // Update Drawer
-    // ==========================================
+    const difference = Number((actual - drawer.expectedCash).toFixed(2));
 
     drawer.actualCash = actual;
+    drawer.difference = difference;
+    drawer.status = "closed";
+    drawer.closedBy = req.user._id;
+    drawer.closedAt = new Date();
 
-    drawer.difference =
-      difference;
-
-    drawer.status =
-      "closed";
-
-    drawer.closedBy =
-      req.user._id;
-
-    drawer.closedAt =
-      new Date();
-
-    if (
-      notes !== undefined
-    ) {
-      drawer.notes = notes;
+    if (notes !== undefined) {
+      drawer.notes = notes.trim();
     }
 
-    await drawer.save({
-      session,
-    });
-
+    await drawer.save({ session });
     await session.commitTransaction();
 
-    // ==========================================
-    // Get Closed Drawer
-    // ==========================================
-
-    const closedDrawer =
-      await cashDrawerModels
-        .findById(drawer._id)
-        .populate(
-          "openedBy",
-          "name email role"
-        )
-        .populate(
-          "closedBy",
-          "name email role"
-        );
+    const closedDrawer = await cashDrawerModels.findById(drawer._id)
+      .populate("openedBy", "name email role")
+      .populate("closedBy", "name email role");
 
     return res.status(200).json({
       success: true,
-
-      message:
-        "Cash drawer closed successfully",
-
-      cashDrawer:
-        closedDrawer,
-
+      message: req.t("cashDrawers.closedSuccessfully"),
+      cashDrawer: closedDrawer,
       summary: {
-        openingBalance:
-          closedDrawer.openingBalance,
-
-        expectedCash:
-          closedDrawer.expectedCash,
-
-        actualCash:
-          closedDrawer.actualCash,
-
-        difference:
-          closedDrawer.difference,
+        openingBalance: closedDrawer.openingBalance,
+        expectedCash: closedDrawer.expectedCash,
+        actualCash: closedDrawer.actualCash,
+        difference: closedDrawer.difference,
       },
     });
-
   } catch (error) {
-
-    await session.abortTransaction();
-
-    console.error(
-      "Close cash drawer error:",
-      error
-    );
-
-    return res.status(400).json({
-      success: false,
-      message: error.message,
-    });
-
+    if (session.inTransaction()) await session.abortTransaction();
+    console.error("Close cash drawer error:", error);
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   } finally {
     await session.endSession();
   }
 };
 
-
-// ==========================================
-// Get All Cash Drawers
-// ==========================================
-const getAllCashDrawers = async (
-  req,
-  res
-) => {
+const getAllCashDrawers = async (req, res) => {
   try {
+    const { status, page = 1, limit = 10 } = req.query;
 
-    const {
-      status,
-      page = 1,
-      limit = 10,
-    } = req.query;
-
-    const filter = {};
-
-    if (status) {
-      filter.status = status;
+    if (status && !["open", "closed"].includes(status)) {
+      return res.status(400).json({ success: false, message: req.t("cashDrawers.invalidStatus") });
     }
 
-    // ==========================================
-    // Pagination
-    // ==========================================
+    const pageNumber = Number(page);
+    const limitNumber = Number(limit);
 
-    const pageNumber = Math.max(
-      Number(page) || 1,
-      1
-    );
+    if (!Number.isInteger(pageNumber) || pageNumber < 1) {
+      return res.status(400).json({ success: false, message: req.t("cashDrawers.invalidPage") });
+    }
 
-    const limitNumber = Math.min(
-      Math.max(
-        Number(limit) || 10,
-        1
-      ),
-      100
-    );
+    if (!Number.isInteger(limitNumber) || limitNumber < 1 || limitNumber > 100) {
+      return res.status(400).json({ success: false, message: req.t("cashDrawers.invalidLimit") });
+    }
 
-    const skip =
-      (pageNumber - 1) *
-      limitNumber;
+    const filter = {};
+    if (status) filter.status = status;
 
-    // ==========================================
-    // Total
-    // ==========================================
+    const skip = (pageNumber - 1) * limitNumber;
 
-    const total =
-      await cashDrawerModels
-        .countDocuments(filter);
-
-    // ==========================================
-    // Drawers
-    // ==========================================
-
-    const drawers =
-      await cashDrawerModels
-        .find(filter)
-        .populate(
-          "openedBy",
-          "name email role"
-        )
-        .populate(
-          "closedBy",
-          "name email role"
-        )
-        .sort({
-          createdAt: -1,
-        })
+    const [total, drawers] = await Promise.all([
+      cashDrawerModels.countDocuments(filter),
+      cashDrawerModels.find(filter)
+        .populate("openedBy", "name email role")
+        .populate("closedBy", "name email role")
+        .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(limitNumber);
+        .limit(limitNumber),
+    ]);
 
     return res.status(200).json({
       success: true,
-
-      cashDrawers:
-        drawers,
-
+      cashDrawers: drawers,
       pagination: {
         page: pageNumber,
         limit: limitNumber,
         total,
-        pages: Math.ceil(
-          total / limitNumber
-        ),
+        pages: Math.ceil(total / limitNumber),
       },
     });
-
   } catch (error) {
-
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
-
+    console.error("Get all cash drawers error:", error);
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   }
 };
 
-
-// ==========================================
-// Get Single Cash Drawer
-// ==========================================
-const getSingleCashDrawer = async (
-  req,
-  res
-) => {
+const getSingleCashDrawer = async (req, res) => {
   try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).json({ success: false, message: req.t("cashDrawers.invalidId") });
+    }
 
-    const drawer =
-      await cashDrawerModels
-        .findById(req.params.id)
-        .populate(
-          "openedBy",
-          "name email role"
-        )
-        .populate(
-          "closedBy",
-          "name email role"
-        );
+    const drawer = await cashDrawerModels.findById(req.params.id)
+      .populate("openedBy", "name email role")
+      .populate("closedBy", "name email role");
 
     if (!drawer) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Cash drawer not found",
-      });
+      return res.status(404).json({ success: false, message: req.t("cashDrawers.notFound") });
     }
 
     return res.status(200).json({
       success: true,
-
       cashDrawer: drawer,
     });
-
   } catch (error) {
-
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
-
+    console.error("Get single cash drawer error:", error);
+    return res.status(500).json({ success: false, message: req.t("common.serverError") });
   }
 };
-
 
 module.exports = {
   openCashDrawer,
