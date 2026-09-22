@@ -10,8 +10,9 @@ const FOLLOW_UP_FEE = 30;
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 
 const createVisit = async (req, res) => {
+  
   try {
-    const { patient, specialty, doctor } = req.body;
+    const { patient, specialty, doctor, firstVisit = false } = req.body;
 
     if (!patient || !specialty) {
       return res.status(400).json({
@@ -83,16 +84,26 @@ const createVisit = async (req, res) => {
     let visitType = "first";
     let consultationFee = FIRST_VISIT_FEE;
 
-    const previousVisit = await visitModels.findOne({
+    const previousVisit = await visitModels.find({
       patient,
       specialty,
       status: { $ne: "cancelled" },
     });
 
-    if (previousVisit) {
-      visitType = "follow_up";
-      consultationFee = FOLLOW_UP_FEE;
+    for (let i = previousVisit.length - 2; i < previousVisit.length; i++){
+      if (previousVisit[i]?.visitType === 'first') {
+        visitType = "follow_up";
+        consultationFee = FOLLOW_UP_FEE;
+      }
     }
+    if (firstVisit ) {
+      visitType = 'first';
+      consultationFee = FIRST_VISIT_FEE;
+    }
+    // if (previousVisit) {
+    //   visitType = "follow_up";
+    //   consultationFee = FOLLOW_UP_FEE;
+    // }
 
     const visit = await visitModels.create({
       patient,
@@ -123,17 +134,16 @@ const createVisit = async (req, res) => {
 
 const getAllVisits = async (req, res) => {
   try {
-    const {
-      patient,
-      specialty,
-      doctor,
-      visitType,
-      paymentStatus,
-      status,
-      page = 1,
-      limit = 10,
+    const {patient,specialty,doctor,visitType,
+      paymentStatus, status, page = 1, limit = 10,
     } = req.query;
 
+
+
+
+
+
+    
     const pageNumber = Number(page);
     const limitNumber = Number(limit);
 
@@ -151,26 +161,26 @@ const getAllVisits = async (req, res) => {
       });
     }
 
-    if (patient && !isValidId(patient)) {
-      return res.status(400).json({
-        success: false,
-        message: req.t("visits.invalidPatientId"),
-      });
-    }
+    // if (patient && !isValidId(patient)) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: req.t("visits.invalidPatientId"),
+    //   });
 
-    if (specialty && !isValidId(specialty)) {
-      return res.status(400).json({
-        success: false,
-        message: req.t("visits.invalidSpecialtyId"),
-      });
-    }
 
-    if (doctor && !isValidId(doctor)) {
-      return res.status(400).json({
-        success: false,
-        message: req.t("visits.invalidDoctorId"),
-      });
-    }
+    // if (specialty && !isValidId(specialty)) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: req.t("visits.invalidSpecialtyId"),
+    //   });
+    // }
+
+    // if (doctor && !isValidId(doctor)) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: req.t("visits.invalidDoctorId"),
+    //   });
+    // }
 
     if (visitType && !["first", "follow_up"].includes(visitType)) {
       return res.status(400).json({
@@ -195,9 +205,30 @@ const getAllVisits = async (req, res) => {
 
     const filter = {};
 
-    if (patient) filter.patient = patient;
-    if (specialty) filter.specialty = specialty;
-    if (doctor) filter.doctor = doctor;
+    // if (patient) filter.patient = patient;
+
+
+    
+    //
+    const filterPatients ={}
+    filterPatients.$or = [{name: { $regex: patient, $options: "i" }}]
+    const patientOne = await patientModels.find(filterPatients)
+    //
+    //
+    const filterDoctors ={}
+    filterDoctors.$or = [{name: { $regex: doctor, $options: "i" }}]
+    const doctors = await doctorModels.find(filterDoctors)
+    //
+    //
+    const filterSpecialty ={}
+    filterSpecialty.$or = [{name: { $regex: specialty, $options: "i" }}]
+    const specialties = await specialtyModels.find(filterSpecialty)
+    //
+    if (patientOne.length && patient ) filter.patient = patientOne.map(item => item._id)
+      if (doctors.length && doctor) filter.doctor = doctors.map(item => item._id);
+    
+    if (specialties.length && specialty) filter.specialty = specialties.map(item => item._id);
+
     if (visitType) filter.visitType = visitType;
     if (paymentStatus) filter.paymentStatus = paymentStatus;
     if (status) filter.status = status;

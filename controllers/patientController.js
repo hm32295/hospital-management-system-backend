@@ -19,35 +19,18 @@ const isValidEmail = (email) => {
 };
 
 // Get All Patients
-const getAllPatient = async (
-  req,
-  res
-) => {
+const getAllPatient = async (req, res) => {
   try {
-    const {
-      search,
-      isActive,
-      page = 1,
-      limit = 10,
-    } = req.query;
+    const { search,isActive,page = 1,limit = 10} = req.query;
 
     const filter = {};
 
     if (isActive !== undefined) {
-      if (
-        isActive !== "true" &&
-        isActive !== "false"
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: req.t(
-            "patients.invalidIsActive"
-          ),
-        });
+      if (isActive !== "true" && isActive !== "false") {
+        return res.status(400).json({success: false,message: req.t("patients.invalidIsActive")});
       }
 
-      filter.isActive =
-        isActive === "true";
+      filter.isActive = isActive === "true";
     } else {
       filter.isActive = true;
     }
@@ -57,9 +40,7 @@ const getAllPatient = async (
 
       filter.$or = [
         {
-          name: {
-            $regex: searchValue,
-            $options: "i",
+          name: { $regex: searchValue, $options: "i",
           },
         },
         {
@@ -77,27 +58,17 @@ const getAllPatient = async (
       ];
     }
 
-    const pageNumber = Math.max(
-      Number(page) || 1,
+    const pageNumber = Math.max( Number(page) || 1,
       1
     );
 
-    const limitNumber = Math.min(
-      Math.max(Number(limit) || 10, 1),
-      100
-    );
+    const limitNumber = Math.min(Math.max(Number(limit) || 10, 1),100);
 
-    const skip =
-      (pageNumber - 1) * limitNumber;
+    const skip =(pageNumber - 1) * limitNumber;
 
-    const total =
-      await patientModels.countDocuments(
-        filter
-      );
+    const total = await patientModels.countDocuments(filter);
 
-    const patients =
-      await patientModels
-        .find(filter)
+    const patients = await patientModels.find(filter)
         .sort({
           createdAt: -1,
         })
